@@ -28,6 +28,7 @@ class Robot:
         # self.plan_success = True
 
         self.planner_backend = kwargs.get("planner_backend", "curobo")
+        self.single_arm = kwargs.get("single_arm", False)
 
         self.left_js = None
         self.right_js = None
@@ -93,7 +94,7 @@ class Robot:
         _entity_origion_pose = _entity_origion_pose[0 if len(_entity_origion_pose) == 1 else 1]
         _entity_origion_pose = sapien.Pose(_entity_origion_pose[:3], _entity_origion_pose[-4:])
         self.right_entity_origion_pose = deepcopy(_entity_origion_pose)
-        self.is_dual_arm = kwargs["dual_arm_embodied"]
+        self.is_dual_arm = kwargs["dual_arm_embodied"] and not self.single_arm
 
         self.left_rotate_lim = left_embodiment_args.get("rotate_lim", [0, 0])
         self.right_rotate_lim = right_embodiment_args.get("rotate_lim", [0, 0])
@@ -103,7 +104,7 @@ class Robot:
         self.right_perfect_direction = right_embodiment_args.get("grasp_perfect_direction",
                                                                  ["front_right", "front_left"])[1]
 
-        if self.is_dual_arm:
+        if kwargs["dual_arm_embodied"]:
             loader: sapien.URDFLoader = scene.create_urdf_loader()
             loader.fix_root_link = True
             self._entity = loader.load(self.left_urdf_path)

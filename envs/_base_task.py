@@ -68,7 +68,11 @@ class Base_Task(gym.Env):
         self.render_freq = kwags.get("render_freq", 10)
         self.data_type = kwags.get("data_type", None)
         self.save_data = kwags.get("save_data", False)
-        self.dual_arm = kwags.get("dual_arm", True)
+        self.single_arm = kwags.get("single_arm", False)
+        self.active_arm = kwags.get("active_arm", "right")
+        if self.active_arm not in ["left", "right"]:
+            raise ValueError(f"active_arm must be 'left' or 'right', not {self.active_arm}")
+        self.dual_arm = False if self.single_arm else kwags.get("dual_arm", True)
         self.eval_mode = kwags.get("eval_mode", False)
         self.step_lim = kwags.get("step_lim", None)
 
@@ -459,6 +463,82 @@ class Base_Task(gym.Env):
         indices = np.unique(indices)
         return positions[indices], velocities[indices]
 
+    def _single_arm_enabled(self):
+        return getattr(self, "single_arm", False)
+
+    def _active_arm(self):
+        return getattr(self, "active_arm", "right")
+
+    def _arm_joint_state(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.get_left_arm_jointState()
+        if arm_tag == "right":
+            return self.robot.get_right_arm_jointState()
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _arm_ee_pose(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.get_left_ee_pose()
+        if arm_tag == "right":
+            return self.robot.get_right_ee_pose()
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _arm_gripper_open(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.is_left_gripper_open()
+        if arm_tag == "right":
+            return self.robot.is_right_gripper_open()
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _arm_gripper_open_half(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.is_left_gripper_open_half()
+        if arm_tag == "right":
+            return self.robot.is_right_gripper_open_half()
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _arm_gripper_close(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.is_left_gripper_close()
+        if arm_tag == "right":
+            return self.robot.is_right_gripper_close()
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _arm_gripper_val(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.get_left_gripper_val()
+        if arm_tag == "right":
+            return self.robot.get_right_gripper_val()
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _arm_mplib_planner(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.left_mplib_planner
+        if arm_tag == "right":
+            return self.robot.right_mplib_planner
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _set_arm_joints(self, arm_tag, position, velocity):
+        self.robot.set_arm_joints(position, velocity, arm_tag)
+
+    def _set_arm_gripper(self, arm_tag, value):
+        self.robot.set_gripper(value, arm_tag)
+
+    def _single_arm_action_dim(self):
+        return len(self._arm_joint_state(self._active_arm()))
+
+    def _normalize_single_arm_chunk_actions(self, chunk_actions):
+        actions = np.asarray(chunk_actions)
+        if actions.ndim == 1:
+            actions = actions[None, :]
+        expected_dim = self._single_arm_action_dim()
+        if actions.shape[-1] != expected_dim:
+            raise ValueError(
+                f"single-arm action dimension mismatch for {self._active_arm()} arm: "
+                f"expected {expected_dim}, got {actions.shape[-1]}"
+            )
+        return actions
+
     def get_obs(self):
         self._update_render()
         self.cameras.update_picture()
@@ -766,21 +846,33 @@ class Base_Task(gym.Env):
         self.prohibited_area.append([x_min, y_min, x_max, y_max])
 
     def is_left_gripper_open(self):
+        if self._single_arm_enabled():
+            return self._arm_gripper_open(self._active_arm())
         return self.robot.is_left_gripper_open()
 
     def is_right_gripper_open(self):
+        if self._single_arm_enabled():
+            return self._arm_gripper_open(self._active_arm())
         return self.robot.is_right_gripper_open()
 
     def is_left_gripper_open_half(self):
+        if self._single_arm_enabled():
+            return self._arm_gripper_open_half(self._active_arm())
         return self.robot.is_left_gripper_open_half()
 
     def is_right_gripper_open_half(self):
+        if self._single_arm_enabled():
+            return self._arm_gripper_open_half(self._active_arm())
         return self.robot.is_right_gripper_open_half()
 
     def is_left_gripper_close(self):
+        if self._single_arm_enabled():
+            return self._arm_gripper_close(self._active_arm())
         return self.robot.is_left_gripper_close()
 
     def is_right_gripper_close(self):
+        if self._single_arm_enabled():
+            return self._arm_gripper_close(self._active_arm())
         return self.robot.is_right_gripper_close()
 
     # =========================================================== Our APIS ===========================================================
@@ -1536,6 +1628,10 @@ class Base_Task(gym.Env):
         return True  # TODO: maybe need try error
 
     def take_action(self, action, action_type:Literal['qpos', 'ee']='qpos'):  # action_type: qpos or ee
+        if self._single_arm_enabled():
+            self._gen_sparse_reward_data_single_arm(action, action_type)
+            return
+
         if self.take_action_cnt == self.step_lim or self.eval_success:
             return
 
@@ -1744,7 +1840,116 @@ class Base_Task(gym.Env):
         if self.render_freq:  # UI
             self.viewer.render()
 
+    def _gen_sparse_reward_data_single_arm(self, chunk_actions, action_type="qpos"):
+        if action_type != "qpos":
+            raise NotImplementedError("single-arm RoboTwin RL currently supports qpos actions only")
+
+        infos = {
+            "success": False,
+        }
+        reward = np.array([0], dtype=np.float32)
+        termination = np.array([0], dtype=np.int32)
+        truncation = np.array([0], dtype=np.int32)
+
+        if getattr(self, "eval_success", False):
+            infos["success"] = True
+            reward = np.array([1], dtype=np.float32)
+            termination = np.array([1], dtype=np.int32)
+            return reward, termination, truncation, infos
+
+        if self.take_action_cnt == self.step_lim:
+            truncation = np.array([1], dtype=np.int32)
+            return reward, termination, truncation, infos
+
+        actions = self._normalize_single_arm_chunk_actions(chunk_actions)
+        self.take_action_cnt += actions.shape[0]
+
+        self._update_render()
+        if self.render_freq:
+            self.viewer.render()
+
+        arm_tag = self._active_arm()
+        jointstate = self._arm_joint_state(arm_tag)
+        arm_dim = len(jointstate) - 1
+
+        arm_actions = actions[:, :arm_dim]
+        gripper_actions = actions[:, arm_dim]
+        current_qpos = np.array(jointstate[:arm_dim])
+        current_gripper = np.array(jointstate[arm_dim:arm_dim + 1])
+
+        arm_path = np.vstack((current_qpos, arm_actions))
+        gripper_path = np.hstack((current_gripper, gripper_actions))
+        arm_path = self.compress_path(arm_path)
+
+        topp_flag = True
+        try:
+            times, pos, vel, acc, duration = self._arm_mplib_planner(arm_tag).TOPP(
+                arm_path, 1 / 250, verbose=True
+            )
+            pos, vel = self.downsample_trajectory(pos, vel)
+            result = {"position": pos, "velocity": vel}
+            n_step = result["position"].shape[0]
+        except Exception:
+            topp_flag = False
+            n_step = 50
+
+        if n_step == 0:
+            topp_flag = False
+            n_step = 50
+
+        mod_num = n_step % len(gripper_actions)
+        gripper_step = [0] + [
+            n_step // len(gripper_actions) + (1 if i < mod_num else 0)
+            for i in range(len(gripper_actions))
+        ]
+
+        gripper = []
+        for idx in range(1, gripper_path.shape[0]):
+            region = np.linspace(
+                gripper_path[idx - 1],
+                gripper_path[idx],
+                gripper_step[idx] + 1,
+            )[1:]
+            gripper = gripper + region.tolist()
+        gripper = np.array(gripper)
+
+        now_id = 0
+        while now_id < n_step:
+            if topp_flag:
+                self._set_arm_joints(
+                    arm_tag,
+                    result["position"][now_id],
+                    result["velocity"][now_id],
+                )
+            self._set_arm_gripper(arm_tag, gripper[now_id])
+
+            now_id += 1
+            self.scene.step()
+            self._update_render()
+
+            if self.check_success():
+                self.eval_success = True
+                infos["success"] = True
+                reward = np.array([1], dtype=np.float32)
+                termination = np.array([1], dtype=np.int32)
+                return reward, termination, truncation, infos
+
+        if getattr(self, "eval_success", False):
+            infos["success"] = True
+            reward = np.array([1], dtype=np.float32)
+            termination = np.array([1], dtype=np.int32)
+
+        if self.take_action_cnt >= self.step_lim:
+            truncation = np.array([1], dtype=np.int32)
+
+        self._update_render()
+        if self.render_freq:
+            self.viewer.render()
+        return reward, termination, truncation, infos
+
     def gen_sparse_reward_data(self, chunk_actions, action_type="qpos"):  # action_type: qpos or ee
+        if self._single_arm_enabled():
+            return self._gen_sparse_reward_data_single_arm(chunk_actions, action_type)
 
         infos = {
             "success": False,
@@ -2082,51 +2287,87 @@ class Base_Task(gym.Env):
             # for step in range(args['rdt_step']):
             for step in range(args['rdt_step']):
                 actions = np.array([take_actions[step]])
+                if actions.ndim == 1:
+                    actions = actions[None, :]
                 left_jointstate = self.robot.get_left_arm_jointState()
                 right_jointstate = self.robot.get_right_arm_jointState()
                 current_jointstate = np.array(left_jointstate + right_jointstate)
+                left_arm_dim = len(left_jointstate) - 1
+                right_arm_dim = len(right_jointstate) - 1
 
                 left_arm_actions , left_gripper_actions , left_current_qpos, left_path = [], [], [], []
                 right_arm_actions , right_gripper_actions , right_current_qpos, right_path = [], [], [], []
                 if self.dual_arm:
-                    left_arm_actions,left_gripper_actions = actions[:, :6],actions[:, 6]
-                    right_arm_actions,right_gripper_actions = actions[:, 7:13],actions[:, 13]
-                    left_current_qpos, right_current_qpos = current_jointstate[:6], current_jointstate[7:13]
-                    left_current_gripper, right_current_gripper = current_jointstate[6:7], current_jointstate[13:14] 
+                    expected_dim = left_arm_dim + 1 + right_arm_dim + 1
+                    if actions.shape[-1] != expected_dim:
+                        raise ValueError(
+                            f"dual-arm action dimension mismatch: expected {expected_dim}, got {actions.shape[-1]}"
+                        )
+                    left_arm_actions,left_gripper_actions = actions[:, :left_arm_dim],actions[:, left_arm_dim]
+                    right_arm_actions,right_gripper_actions = actions[:, left_arm_dim + 1:left_arm_dim + right_arm_dim + 1],actions[:, left_arm_dim + right_arm_dim + 1]
+                    left_current_qpos, right_current_qpos = current_jointstate[:left_arm_dim], current_jointstate[left_arm_dim + 1:left_arm_dim + right_arm_dim + 1]
+                    left_current_gripper, right_current_gripper = current_jointstate[left_arm_dim:left_arm_dim + 1], current_jointstate[left_arm_dim + right_arm_dim + 1:left_arm_dim + right_arm_dim + 2]
                 else:
-                    right_arm_actions,right_gripper_actions = actions[:, :6],actions[:, 6]
-                    right_current_qpos = current_jointstate[:6]
-                    right_current_gripper = current_jointstate[6:7]
+                    active_arm = self._active_arm() if self._single_arm_enabled() else "right"
+                    active_dim = left_arm_dim if active_arm == "left" else right_arm_dim
+                    expected_dim = active_dim + 1
+                    if actions.shape[-1] != expected_dim:
+                        raise ValueError(
+                            f"single-arm action dimension mismatch for {active_arm} arm: "
+                            f"expected {expected_dim}, got {actions.shape[-1]}"
+                        )
+
+                    left_current_qpos = np.array(left_jointstate[:left_arm_dim])
+                    left_current_gripper = np.array(left_jointstate[left_arm_dim:left_arm_dim + 1])
+                    right_current_qpos = np.array(right_jointstate[:right_arm_dim])
+                    right_current_gripper = np.array(right_jointstate[right_arm_dim:right_arm_dim + 1])
+                    if active_arm == "left":
+                        left_arm_actions,left_gripper_actions = actions[:, :left_arm_dim],actions[:, left_arm_dim]
+                        right_arm_actions = np.array([right_current_qpos])
+                        right_gripper_actions = np.array([right_current_gripper[0]])
+                    else:
+                        left_arm_actions = np.array([left_current_qpos])
+                        left_gripper_actions = np.array([left_current_gripper[0]])
+                        right_arm_actions,right_gripper_actions = actions[:, :right_arm_dim],actions[:, right_arm_dim]
                 
-                if self.dual_arm:
-                    left_path = np.vstack((left_current_qpos, left_arm_actions))
-                    left_gripper_path = np.hstack((left_current_gripper, left_gripper_actions))
+                left_path = np.vstack((left_current_qpos, left_arm_actions))
+                left_gripper_path = np.hstack((left_current_gripper, left_gripper_actions))
                 right_path = np.vstack((right_current_qpos, right_arm_actions))
                 right_gripper_path = np.hstack((right_current_gripper, right_gripper_actions))
 
                 topp_left_flag, topp_right_flag = True, True
-                try:
-                    times, left_pos, left_vel, acc, duration = self.robot.left_mplib_planner.TOPP(left_path, 1/250, verbose=True)
-                    left_result = dict()
-                    left_result['position'], left_result['velocity'] = left_pos, left_vel
-                    left_n_step = left_result["position"].shape[0]
-                except Exception as e:
-                    print('left arm TOPP error: ', e)
+                plan_left = self.dual_arm or ((self._active_arm() if self._single_arm_enabled() else "right") == "left")
+                plan_right = self.dual_arm or ((self._active_arm() if self._single_arm_enabled() else "right") == "right")
+                if plan_left:
+                    try:
+                        times, left_pos, left_vel, acc, duration = self.robot.left_mplib_planner.TOPP(left_path, 1/250, verbose=True)
+                        left_result = dict()
+                        left_result['position'], left_result['velocity'] = left_pos, left_vel
+                        left_n_step = left_result["position"].shape[0]
+                    except Exception as e:
+                        print('left arm TOPP error: ', e)
+                        topp_left_flag = False
+                        left_n_step = 1
+                else:
                     topp_left_flag = False
                     left_n_step = 1
                 
-                if left_n_step == 0 or (not self.dual_arm):
+                if left_n_step == 0 or (not plan_left):
                     topp_left_flag = False
                     left_n_step = 1
 
-                try:
-                    times, right_pos, right_vel, acc, duration = self.robot.right_mplib_planner.TOPP(right_path, 1/250, verbose=True)            
-                    right_result = dict()
-                    right_result['position'], right_result['velocity'] = right_pos, right_vel
-                    right_n_step = right_result["position"].shape[0]
-                    # right_gripper = np.linspace(right_gripper[0], right_gripper[-1], right_n_step)
-                except Exception as e:
-                    print('right arm TOPP error: ', e)
+                if plan_right:
+                    try:
+                        times, right_pos, right_vel, acc, duration = self.robot.right_mplib_planner.TOPP(right_path, 1/250, verbose=True)
+                        right_result = dict()
+                        right_result['position'], right_result['velocity'] = right_pos, right_vel
+                        right_n_step = right_result["position"].shape[0]
+                        # right_gripper = np.linspace(right_gripper[0], right_gripper[-1], right_n_step)
+                    except Exception as e:
+                        print('right arm TOPP error: ', e)
+                        topp_right_flag = False
+                        right_n_step = 1
+                else:
                     topp_right_flag = False
                     right_n_step = 1
             
@@ -2307,26 +2548,52 @@ class Base_Task(gym.Env):
         self.episode_right_gripper_state = [self.robot.is_right_gripper_open()]
 
         for step in range(chunk_actions.shape[0]):
-            actions = chunk_actions[step]
+            actions = np.asarray(chunk_actions[step])
+            if actions.ndim == 1:
+                actions = actions[None, :]
             left_jointstate = self.robot.get_left_arm_jointState()
             right_jointstate = self.robot.get_right_arm_jointState()
             current_jointstate = np.array(left_jointstate + right_jointstate)
+            left_arm_dim = len(left_jointstate) - 1
+            right_arm_dim = len(right_jointstate) - 1
 
             left_arm_actions , left_gripper_actions , left_current_qpos, left_path = [], [], [], []
             right_arm_actions , right_gripper_actions , right_current_qpos, right_path = [], [], [], []
             if self.dual_arm:
-                left_arm_actions,left_gripper_actions = actions[:, :6],actions[:, 6]
-                right_arm_actions,right_gripper_actions = actions[:, 7:13],actions[:, 13]
-                left_current_qpos, right_current_qpos = current_jointstate[:6], current_jointstate[7:13]
-                left_current_gripper, right_current_gripper = current_jointstate[6:7], current_jointstate[13:14] 
+                expected_dim = left_arm_dim + 1 + right_arm_dim + 1
+                if actions.shape[-1] != expected_dim:
+                    raise ValueError(
+                        f"dual-arm action dimension mismatch: expected {expected_dim}, got {actions.shape[-1]}"
+                    )
+                left_arm_actions,left_gripper_actions = actions[:, :left_arm_dim],actions[:, left_arm_dim]
+                right_arm_actions,right_gripper_actions = actions[:, left_arm_dim + 1:left_arm_dim + right_arm_dim + 1],actions[:, left_arm_dim + right_arm_dim + 1]
+                left_current_qpos, right_current_qpos = current_jointstate[:left_arm_dim], current_jointstate[left_arm_dim + 1:left_arm_dim + right_arm_dim + 1]
+                left_current_gripper, right_current_gripper = current_jointstate[left_arm_dim:left_arm_dim + 1], current_jointstate[left_arm_dim + right_arm_dim + 1:left_arm_dim + right_arm_dim + 2]
             else:
-                right_arm_actions,right_gripper_actions = actions[:, :6],actions[:, 6]
-                right_current_qpos = current_jointstate[:6]
-                right_current_gripper = current_jointstate[6:7]
+                active_arm = self._active_arm() if self._single_arm_enabled() else "right"
+                active_dim = left_arm_dim if active_arm == "left" else right_arm_dim
+                expected_dim = active_dim + 1
+                if actions.shape[-1] != expected_dim:
+                    raise ValueError(
+                        f"single-arm action dimension mismatch for {active_arm} arm: "
+                        f"expected {expected_dim}, got {actions.shape[-1]}"
+                    )
+
+                left_current_qpos = np.array(left_jointstate[:left_arm_dim])
+                left_current_gripper = np.array(left_jointstate[left_arm_dim:left_arm_dim + 1])
+                right_current_qpos = np.array(right_jointstate[:right_arm_dim])
+                right_current_gripper = np.array(right_jointstate[right_arm_dim:right_arm_dim + 1])
+                if active_arm == "left":
+                    left_arm_actions,left_gripper_actions = actions[:, :left_arm_dim],actions[:, left_arm_dim]
+                    right_arm_actions = np.array([right_current_qpos])
+                    right_gripper_actions = np.array([right_current_gripper[0]])
+                else:
+                    left_arm_actions = np.array([left_current_qpos])
+                    left_gripper_actions = np.array([left_current_gripper[0]])
+                    right_arm_actions,right_gripper_actions = actions[:, :right_arm_dim],actions[:, right_arm_dim]
             
-            if self.dual_arm:
-                left_path = np.vstack((left_current_qpos, left_arm_actions))
-                left_gripper_path = np.hstack((left_current_gripper, left_gripper_actions))
+            left_path = np.vstack((left_current_qpos, left_arm_actions))
+            left_gripper_path = np.hstack((left_current_gripper, left_gripper_actions))
             right_path = np.vstack((right_current_qpos, right_arm_actions))
             right_gripper_path = np.hstack((right_current_gripper, right_gripper_actions))
 
@@ -2334,29 +2601,39 @@ class Base_Task(gym.Env):
             right_path = self.compress_path(right_path)
 
             topp_left_flag, topp_right_flag = True, True
-            try:
-                times, left_pos, left_vel, acc, duration = self.robot.left_mplib_planner.TOPP(left_path, 1/250, verbose=True)
-                left_pos, left_vel = self.downsample_trajectory(left_pos, left_vel)
-                left_result = dict()
-                left_result['position'], left_result['velocity'] = left_pos, left_vel
-                left_n_step = left_result["position"].shape[0]
-                # left_gripper = np.linspace(left_gripper[0], left_gripper[-1], left_n_step)
-            except Exception as e:
+            plan_left = self.dual_arm or ((self._active_arm() if self._single_arm_enabled() else "right") == "left")
+            plan_right = self.dual_arm or ((self._active_arm() if self._single_arm_enabled() else "right") == "right")
+            if plan_left:
+                try:
+                    times, left_pos, left_vel, acc, duration = self.robot.left_mplib_planner.TOPP(left_path, 1/250, verbose=True)
+                    left_pos, left_vel = self.downsample_trajectory(left_pos, left_vel)
+                    left_result = dict()
+                    left_result['position'], left_result['velocity'] = left_pos, left_vel
+                    left_n_step = left_result["position"].shape[0]
+                    # left_gripper = np.linspace(left_gripper[0], left_gripper[-1], left_n_step)
+                except Exception as e:
+                    topp_left_flag = False
+                    left_n_step = 1
+            else:
                 topp_left_flag = False
                 left_n_step = 1
             
-            if left_n_step == 0 or (not self.dual_arm):
+            if left_n_step == 0 or (not plan_left):
                 topp_left_flag = False
                 left_n_step = 1
 
-            try:
-                times, right_pos, right_vel, acc, duration = self.robot.right_mplib_planner.TOPP(right_path, 1/250, verbose=True)            
-                right_pos, right_vel = self.downsample_trajectory(right_pos, right_vel)
-                right_result = dict()
-                right_result['position'], right_result['velocity'] = right_pos, right_vel
-                right_n_step = right_result["position"].shape[0]
-                # right_gripper = np.linspace(right_gripper[0], right_gripper[-1], right_n_step)
-            except Exception as e:
+            if plan_right:
+                try:
+                    times, right_pos, right_vel, acc, duration = self.robot.right_mplib_planner.TOPP(right_path, 1/250, verbose=True)
+                    right_pos, right_vel = self.downsample_trajectory(right_pos, right_vel)
+                    right_result = dict()
+                    right_result['position'], right_result['velocity'] = right_pos, right_vel
+                    right_n_step = right_result["position"].shape[0]
+                    # right_gripper = np.linspace(right_gripper[0], right_gripper[-1], right_n_step)
+                except Exception as e:
+                    topp_right_flag = False
+                    right_n_step = 1
+            else:
                 topp_right_flag = False
                 right_n_step = 1
         
@@ -2446,6 +2723,15 @@ class Base_Task(gym.Env):
     
     def is_in_hand(self, actor):
         # 判断夹爪中心位置与物体中心位置的距离, 夹爪是否关闭
+        if self._single_arm_enabled():
+            arm_tag = self._active_arm()
+            eef_pose = np.array(self._arm_ee_pose(arm_tag))[:3]
+            actor_pose = actor.pose() if hasattr(actor, "pose") else actor.get_pose().p
+            in_hand = np.linalg.norm(eef_pose - actor_pose) < 0.05
+            if arm_tag == "left":
+                return in_hand, False
+            return False, in_hand
+
         if self.dual_arm:
             contacts = self.scene.get_contacts()
             left_gripper_contact_count = 0
@@ -2469,8 +2755,6 @@ class Base_Task(gym.Env):
             # print("contact:", left_gripper_contact_count, right_gripper_contact_count)
             return (left_gripper_contact_count >= 2 and self.robot.is_left_gripper_close()),(right_gripper_contact_count >= 2 and self.robot.is_right_gripper_close())
         else:
-            eef_pose = self.robot.get_ee_pose()
-            eef_pose = np.array(eef_pose)
-            eef_pose = eef_pose[:3]
-            if np.linalg.norm(eef_pose - actor.pose()) < 0.05:
-                return True
+            eef_pose = np.array(self.robot.get_right_ee_pose())[:3]
+            in_hand = np.linalg.norm(eef_pose - actor.pose()) < 0.05
+            return False, in_hand
