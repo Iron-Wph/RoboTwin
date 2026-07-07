@@ -11,7 +11,10 @@ class place_empty_cup(Base_Task):
         super()._init_task_env_(**kwags)
 
     def load_actors(self):
-        tag = np.random.randint(0, 2)
+        if self.single_arm:
+            tag = 0 if self.active_arm == "right" else 1
+        else:
+            tag = np.random.randint(0, 2)
         cup_xlim = [[0.15, 0.3], [-0.3, -0.15]]
         coaster_lim = [[-0.05, 0.1], [-0.1, 0.05]]
         self.cup = rand_create_actor(
@@ -72,8 +75,11 @@ class place_empty_cup(Base_Task):
     def play_once(self):
         # Get the current pose of the cup
         cup_pose = self.cup.get_pose().p
-        # Determine which arm to use based on cup's x position (right if positive, left if negative)
-        arm_tag = ArmTag("right" if cup_pose[0] > 0 else "left")
+        if self.single_arm:
+            arm_tag = ArmTag(self.active_arm)
+        else:
+            # Determine which arm to use based on cup's x position (right if positive, left if negative)
+            arm_tag = ArmTag("right" if cup_pose[0] > 0 else "left")
 
         # Close the gripper to prepare for grasping
         self.move(self.close_gripper(arm_tag, pos=0.6))

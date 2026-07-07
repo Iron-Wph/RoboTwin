@@ -46,13 +46,10 @@ def class_decorator(task_name):
 
 
 def update_obs(observation, args=None):
-    full_image = observation["observation"]["head_camera"]["rgb"]
-    left_wrist_image = (
-        observation["observation"].get("left_camera", {}).get("rgb", None)
-    )
-    right_wrist_image = (
-        observation["observation"].get("right_camera", {}).get("rgb", None)
-    )
+    raw_camera_obs = observation["observation"]
+    full_image = raw_camera_obs["head_camera"]["rgb"]
+    left_wrist_image = raw_camera_obs.get("left_camera", {}).get("rgb", None)
+    right_wrist_image = raw_camera_obs.get("right_camera", {}).get("rgb", None)
     if args is not None and args.get("single_arm", False):
         active_arm = args.get("active_arm", "right")
         arm_key = f"{active_arm}_arm"
@@ -69,12 +66,18 @@ def update_obs(observation, args=None):
     else:
         state = observation["joint_action"]["vector"]
 
-    return {
+    obs = {
         "full_image": full_image,
         "left_wrist_image": left_wrist_image,
         "right_wrist_image": right_wrist_image,
         "state": state,
     }
+    if args is not None:
+        for camera_name in args.get("debug_camera_names", []):
+            camera_obs = raw_camera_obs.get(camera_name, None)
+            if camera_obs is not None and camera_obs.get("rgb", None) is not None:
+                obs[f"{camera_name}_image"] = camera_obs["rgb"]
+    return obs
 
 
 class SubEnv:
