@@ -57,6 +57,7 @@ class Camera:
 
         self.collect_head_camera = kwags["camera"].get("collect_head_camera", True)
         self.collect_wrist_camera = kwags["camera"].get("collect_wrist_camera", True)
+        self.single_arm = kwags.get("single_arm_embodied", False)
 
         # embodiment = kwags.get('embodiment')
         # embodiment_config_path = os.path.join(CONFIGS_PATH, '_embodiment_config.yml')
@@ -141,14 +142,17 @@ class Camera:
                 far=far,
             )
 
-            self.right_camera = scene.add_camera(
-                name="right_camera",
-                width=wrist_camera_config["w"],
-                height=wrist_camera_config["h"],
-                fovy=np.deg2rad(wrist_camera_config["fovy"]),
-                near=near,
-                far=far,
-            )
+            if self.single_arm:
+                self.right_camera = self.left_camera
+            else:
+                self.right_camera = scene.add_camera(
+                    name="right_camera",
+                    width=wrist_camera_config["w"],
+                    height=wrist_camera_config["h"],
+                    fovy=np.deg2rad(wrist_camera_config["fovy"]),
+                    near=near,
+                    far=far,
+                )
 
         # ================================= sensor camera =================================
         # sensor_config = StereoDepthSensorConfig()
@@ -274,7 +278,8 @@ class Camera:
         # camera
         if self.collect_wrist_camera:
             self.left_camera.take_picture()
-            self.right_camera.take_picture()
+            if not self.single_arm:
+                self.right_camera.take_picture()
 
         for camera in self.static_camera_list:
             camera.take_picture()
@@ -290,7 +295,8 @@ class Camera:
         """
         if self.collect_wrist_camera:
             self.left_camera.entity.set_pose(left_pose)
-            self.right_camera.entity.set_pose(right_pose)
+            if not self.single_arm:
+                self.right_camera.entity.set_pose(right_pose)
 
     def get_config(self) -> dict:
         res = {}
@@ -307,7 +313,8 @@ class Camera:
 
         if self.collect_wrist_camera:
             res["left_camera"] = _get_config(self.left_camera)
-            res["right_camera"] = _get_config(self.right_camera)
+            if not self.single_arm:
+                res["right_camera"] = _get_config(self.right_camera)
 
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
             if camera_name == "head_camera":
@@ -346,9 +353,10 @@ class Camera:
 
         if self.collect_wrist_camera:
             res["left_camera"] = {}
-            res["right_camera"] = {}
             res["left_camera"]["rgba"] = _get_rgba(self.left_camera)
-            res["right_camera"]["rgba"] = _get_rgba(self.right_camera)
+            if not self.single_arm:
+                res["right_camera"] = {}
+                res["right_camera"]["rgba"] = _get_rgba(self.right_camera)
 
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
             if camera_name == "head_camera":
@@ -394,9 +402,10 @@ class Camera:
 
         if self.collect_wrist_camera:
             res["left_camera"] = {}
-            res["right_camera"] = {}
             res["left_camera"][f"{level}_segmentation"] = _get_segmentation(self.left_camera, level=level)
-            res["right_camera"][f"{level}_segmentation"] = _get_segmentation(self.right_camera, level=level)
+            if not self.single_arm:
+                res["right_camera"] = {}
+                res["right_camera"][f"{level}_segmentation"] = _get_segmentation(self.right_camera, level=level)
 
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
             if camera_name == "head_camera":
@@ -427,11 +436,12 @@ class Camera:
 
         if self.collect_wrist_camera:
             res["left_camera"] = {}
-            res["right_camera"] = {}
             res["left_camera"]["depth"] = _get_depth(self.left_camera)
-            res["right_camera"]["depth"] = _get_depth(self.right_camera)
             res["left_camera"]["depth"] *= rgba["left_camera"]["rgba"][:, :, 3] / 255
-            res["right_camera"]["depth"] *= rgba["right_camera"]["rgba"][:, :, 3] / 255
+            if not self.single_arm:
+                res["right_camera"] = {}
+                res["right_camera"]["depth"] = _get_depth(self.right_camera)
+                res["right_camera"]["depth"] *= rgba["right_camera"]["rgba"][:, :, 3] / 255
         
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
             if camera_name == "head_camera":
@@ -548,10 +558,13 @@ class Camera:
         if if_combine:
             # combined_pcd = np.vstack((head_pcd , left_pcd , right_pcd, front_pcd))
             if self.collect_wrist_camera:
-                combined_pcd = np.vstack((
-                    _get_camera_pcd(self.left_camera),
-                    _get_camera_pcd(self.right_camera),
-                ))
+                if self.single_arm:
+                    combined_pcd = _get_camera_pcd(self.left_camera)
+                else:
+                    combined_pcd = np.vstack((
+                        _get_camera_pcd(self.left_camera),
+                        _get_camera_pcd(self.right_camera),
+                    ))
             for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
                 if camera_name == "head_camera":
                     if self.collect_head_camera:

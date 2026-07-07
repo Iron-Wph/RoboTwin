@@ -36,6 +36,8 @@ class Robot:
         right_robot_file = kwargs["right_robot_file"]
 
         self.need_topp = need_topp
+        self.is_dual_arm = bool(kwargs.get("dual_arm_embodied", False))
+        self.single_arm = bool(kwargs.get("single_arm_embodied", False))
 
         self.left_urdf_path = os.path.join(left_robot_file, left_embodiment_args["urdf_path"])
         self.left_srdf_path = left_embodiment_args.get("srdf_path", None)
@@ -64,44 +66,74 @@ class Robot:
         _entity_origion_pose = sapien.Pose(_entity_origion_pose[:3], _entity_origion_pose[-4:])
         self.left_entity_origion_pose = deepcopy(_entity_origion_pose)
 
-        self.right_urdf_path = os.path.join(right_robot_file, right_embodiment_args["urdf_path"])
-        self.right_srdf_path = right_embodiment_args.get("srdf_path", None)
-        if self.right_srdf_path is not None:
-            self.right_srdf_path = os.path.join(right_robot_file, self.right_srdf_path)
-        self.right_curobo_yml_path = os.path.join(right_robot_file, "curobo.yml")
-        self.right_joint_stiffness = right_embodiment_args.get("joint_stiffness", 1000)
-        self.right_joint_damping = right_embodiment_args.get("joint_damping", 200)
-        self.right_gripper_stiffness = right_embodiment_args.get("gripper_stiffness", 1000)
-        self.right_gripper_damping = right_embodiment_args.get("gripper_damping", 200)
-        self.right_planner_type = right_embodiment_args.get("planner", "mplib_RRT")
-        self.right_move_group = right_embodiment_args["move_group"][1]
-        self.right_ee_name = right_embodiment_args["ee_joints"][1]
-        self.right_arm_joints_name = right_embodiment_args["arm_joints_name"][1]
-        self.right_gripper_name = right_embodiment_args["gripper_name"][1]
-        self.right_gripper_bias = right_embodiment_args["gripper_bias"]
-        self.right_gripper_scale = right_embodiment_args["gripper_scale"]
-        self.right_homestate = right_embodiment_args.get("homestate", [[1] * len(self.right_arm_joints_name)])[1]
-        self.right_fix_gripper_name = right_embodiment_args.get("fix_gripper_name", [])
-        self.right_delta_matrix = np.array(right_embodiment_args.get("delta_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]]))
-        self.right_inv_delta_matrix = np.linalg.inv(self.right_delta_matrix)
-        self.right_global_trans_matrix = np.array(
-            right_embodiment_args.get("global_trans_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]]))
+        if self.single_arm:
+            self.right_urdf_path = self.left_urdf_path
+            self.right_srdf_path = self.left_srdf_path
+            self.right_curobo_yml_path = self.left_curobo_yml_path
+            self.right_joint_stiffness = self.left_joint_stiffness
+            self.right_joint_damping = self.left_joint_damping
+            self.right_gripper_stiffness = self.left_gripper_stiffness
+            self.right_gripper_damping = self.left_gripper_damping
+            self.right_planner_type = self.left_planner_type
+            self.right_move_group = self.left_move_group
+            self.right_ee_name = self.left_ee_name
+            self.right_arm_joints_name = self.left_arm_joints_name
+            self.right_gripper_name = self.left_gripper_name
+            self.right_gripper_bias = self.left_gripper_bias
+            self.right_gripper_scale = self.left_gripper_scale
+            self.right_homestate = self.left_homestate
+            self.right_fix_gripper_name = deepcopy(self.left_fix_gripper_name)
+            self.right_delta_matrix = self.left_delta_matrix
+            self.right_inv_delta_matrix = self.left_inv_delta_matrix
+            self.right_global_trans_matrix = self.left_global_trans_matrix
+            self.right_entity_origion_pose = deepcopy(self.left_entity_origion_pose)
+        else:
+            self.right_urdf_path = os.path.join(right_robot_file, right_embodiment_args["urdf_path"])
+            self.right_srdf_path = right_embodiment_args.get("srdf_path", None)
+            if self.right_srdf_path is not None:
+                self.right_srdf_path = os.path.join(right_robot_file, self.right_srdf_path)
+            self.right_curobo_yml_path = os.path.join(right_robot_file, "curobo.yml")
+            self.right_joint_stiffness = right_embodiment_args.get("joint_stiffness", 1000)
+            self.right_joint_damping = right_embodiment_args.get("joint_damping", 200)
+            self.right_gripper_stiffness = right_embodiment_args.get("gripper_stiffness", 1000)
+            self.right_gripper_damping = right_embodiment_args.get("gripper_damping", 200)
+            self.right_planner_type = right_embodiment_args.get("planner", "mplib_RRT")
+            self.right_move_group = right_embodiment_args["move_group"][1]
+            self.right_ee_name = right_embodiment_args["ee_joints"][1]
+            self.right_arm_joints_name = right_embodiment_args["arm_joints_name"][1]
+            self.right_gripper_name = right_embodiment_args["gripper_name"][1]
+            self.right_gripper_bias = right_embodiment_args["gripper_bias"]
+            self.right_gripper_scale = right_embodiment_args["gripper_scale"]
+            self.right_homestate = right_embodiment_args.get("homestate", [[1] * len(self.right_arm_joints_name)])[1]
+            self.right_fix_gripper_name = right_embodiment_args.get("fix_gripper_name", [])
+            self.right_delta_matrix = np.array(right_embodiment_args.get("delta_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]]))
+            self.right_inv_delta_matrix = np.linalg.inv(self.right_delta_matrix)
+            self.right_global_trans_matrix = np.array(
+                right_embodiment_args.get("global_trans_matrix", [[1, 0, 0], [0, 1, 0], [0, 0, 1]]))
 
-        _entity_origion_pose = right_embodiment_args.get("robot_pose", [[0, -0.65, 0, 1, 0, 0, 1]])
-        _entity_origion_pose = _entity_origion_pose[0 if len(_entity_origion_pose) == 1 else 1]
-        _entity_origion_pose = sapien.Pose(_entity_origion_pose[:3], _entity_origion_pose[-4:])
-        self.right_entity_origion_pose = deepcopy(_entity_origion_pose)
-        self.is_dual_arm = kwargs["dual_arm_embodied"]
+            _entity_origion_pose = right_embodiment_args.get("robot_pose", [[0, -0.65, 0, 1, 0, 0, 1]])
+            _entity_origion_pose = _entity_origion_pose[0 if len(_entity_origion_pose) == 1 else 1]
+            _entity_origion_pose = sapien.Pose(_entity_origion_pose[:3], _entity_origion_pose[-4:])
+            self.right_entity_origion_pose = deepcopy(_entity_origion_pose)
 
         self.left_rotate_lim = left_embodiment_args.get("rotate_lim", [0, 0])
-        self.right_rotate_lim = right_embodiment_args.get("rotate_lim", [0, 0])
+        self.right_rotate_lim = self.left_rotate_lim if self.single_arm else right_embodiment_args.get("rotate_lim", [0, 0])
 
         self.left_perfect_direction = left_embodiment_args.get("grasp_perfect_direction",
                                                                ["front_right", "front_left"])[0]
-        self.right_perfect_direction = right_embodiment_args.get("grasp_perfect_direction",
-                                                                 ["front_right", "front_left"])[1]
+        self.right_perfect_direction = (
+            self.left_perfect_direction
+            if self.single_arm
+            else right_embodiment_args.get("grasp_perfect_direction", ["front_right", "front_left"])[1]
+        )
 
-        if self.is_dual_arm:
+        if self.single_arm:
+            loader: sapien.URDFLoader = scene.create_urdf_loader()
+            loader.fix_root_link = True
+            self._entity = loader.load(self.left_urdf_path)
+            self.left_entity = self._entity
+            self.right_entity = self._entity
+        elif self.is_dual_arm:
             loader: sapien.URDFLoader = scene.create_urdf_loader()
             loader.fix_root_link = True
             self._entity = loader.load(self.left_urdf_path)
@@ -119,7 +151,8 @@ class Robot:
             self.right_entity = right_loader.load(self.right_urdf_path)
 
         self.left_entity.set_root_pose(self.left_entity_origion_pose)
-        self.right_entity.set_root_pose(self.right_entity_origion_pose)
+        if self.right_entity is not self.left_entity:
+            self.right_entity.set_root_pose(self.right_entity_origion_pose)
 
     def reset(self, scene, need_topp=False, **kwargs):
         self._init_robot_(scene, need_topp, **kwargs)
@@ -137,7 +170,13 @@ class Robot:
 
         self.init_joints()
 
+    def _normalize_arm_tag(self, arm_tag):
+        if self.single_arm:
+            return "left"
+        return str(arm_tag)
+
     def get_grasp_perfect_direction(self, arm_tag):
+        arm_tag = self._normalize_arm_tag(arm_tag)
         if arm_tag == "left":
             return self.left_perfect_direction
         elif arm_tag == "right":
@@ -145,6 +184,7 @@ class Robot:
 
     def create_target_pose_list(self, origin_pose, center_pose, arm_tag=None):
         res_lst = []
+        arm_tag = self._normalize_arm_tag(arm_tag)
         rotate_lim = (self.left_rotate_lim if arm_tag == "left" else self.right_rotate_lim)
         rotate_step = (rotate_lim[1] - rotate_lim[0]) / CONFIGS.ROTATE_NUM
         for i in range(CONFIGS.ROTATE_NUM):
@@ -160,6 +200,7 @@ class Robot:
         return res_lst
 
     def get_constraint_pose(self, ori_vec: list, arm_tag=None):
+        arm_tag = self._normalize_arm_tag(arm_tag)
         inv_delta_matrix = (self.left_inv_delta_matrix if arm_tag == "left" else self.right_inv_delta_matrix)
         return ori_vec[:3] + (ori_vec[-3:] @ np.linalg.inv(inv_delta_matrix)).tolist()
 
@@ -258,11 +299,31 @@ class Robot:
         abs_left_curobo_yml_path = os.path.join(CONFIGS.ROOT_PATH, self.left_curobo_yml_path)
         abs_right_curobo_yml_path = os.path.join(CONFIGS.ROOT_PATH, self.right_curobo_yml_path)
 
-        self.communication_flag = (abs_left_curobo_yml_path != abs_right_curobo_yml_path)
+        self.communication_flag = (abs_left_curobo_yml_path != abs_right_curobo_yml_path) and not self.single_arm
 
         if self.is_dual_arm:
             abs_left_curobo_yml_path = abs_left_curobo_yml_path.replace("curobo.yml", "curobo_left.yml")
             abs_right_curobo_yml_path = abs_right_curobo_yml_path.replace("curobo.yml", "curobo_right.yml")
+
+        if self.single_arm:
+            self.left_planner = CuroboPlanner(self.left_entity_origion_pose,
+                                              self.left_arm_joints_name,
+                                              [joint.get_name() for joint in self.left_entity.get_active_joints()],
+                                              yml_path=abs_left_curobo_yml_path)
+            self.right_planner = self.left_planner
+
+            if self.need_topp:
+                self.left_mplib_planner = MplibPlanner(
+                    self.left_urdf_path,
+                    self.left_srdf_path,
+                    self.left_move_group,
+                    self.left_entity_origion_pose,
+                    self.left_entity,
+                    self.left_planner_type,
+                    scene,
+                )
+                self.right_mplib_planner = self.left_mplib_planner
+            return
 
         if not self.communication_flag:
             self.left_planner = CuroboPlanner(self.left_entity_origion_pose,
@@ -323,11 +384,13 @@ class Robot:
     def update_world_pcd(self, world_pcd):
         try:
             self.left_planner.update_point_cloud(world_pcd, resolution=0.02)
-            self.right_planner.update_point_cloud(world_pcd, resolution=0.02)
+            if not self.single_arm:
+                self.right_planner.update_point_cloud(world_pcd, resolution=0.02)
         except:
             print("Update world pointcloud wrong!")
 
     def _trans_from_gripper_to_endlink(self, target_pose, arm_tag=None):
+        arm_tag = self._normalize_arm_tag(arm_tag)
         gripper_bias = (self.left_gripper_bias if arm_tag == "left" else self.right_gripper_bias)
         inv_delta_matrix = (self.left_inv_delta_matrix if arm_tag == "left" else self.right_inv_delta_matrix)
         target_pose_arr = np.array(target_pose)
@@ -346,6 +409,8 @@ class Robot:
             return self.left_planner.plan_grippers(now_val, target_val)
 
     def right_plan_grippers(self, now_val, target_val):
+        if self.single_arm:
+            return self.left_plan_grippers(now_val, target_val)
         if self.communication_flag:
             self.right_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.right_conn.recv()
@@ -395,6 +460,14 @@ class Robot:
         use_attach=False,
         last_qpos=None,
     ):
+        if self.single_arm:
+            return self.left_plan_multi_path(
+                target_lst,
+                constraint_pose=constraint_pose,
+                use_point_cloud=use_point_cloud,
+                use_attach=use_attach,
+                last_qpos=last_qpos,
+            )
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="right")
         if last_qpos is None:
@@ -464,6 +537,14 @@ class Robot:
         use_attach=False,
         last_qpos=None,
     ):
+        if self.single_arm:
+            return self.left_plan_path(
+                target_pose,
+                constraint_pose=constraint_pose,
+                use_point_cloud=use_point_cloud,
+                use_attach=use_attach,
+                last_qpos=last_qpos,
+            )
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="right")
         if last_qpos is None:
@@ -499,6 +580,8 @@ class Robot:
         return jointState_list
 
     def get_right_arm_jointState(self) -> list:
+        if self.single_arm:
+            return self.get_left_arm_jointState()
         jointState_list = []
         for joint in self.right_arm_joints:
             jointState_list.append(joint.get_drive_target()[0].astype(float))
@@ -515,6 +598,8 @@ class Robot:
         return jointState_list
 
     def get_right_arm_real_jointState(self) -> list:
+        if self.single_arm:
+            return self.get_left_arm_real_jointState()
         jointState_list = []
         right_joints_qpos = self.right_entity.get_qpos()
         right_active_joints = self.right_entity.get_active_joints()
@@ -530,6 +615,8 @@ class Robot:
         return self.left_gripper_val
 
     def get_right_gripper_val(self):
+        if self.single_arm:
+            return self.get_left_gripper_val()
         if None in self.right_gripper:
             print("No gripper")
             return 0
@@ -539,18 +626,24 @@ class Robot:
         return self.left_gripper_val > 0.8
 
     def is_right_gripper_open(self):
+        if self.single_arm:
+            return self.is_left_gripper_open()
         return self.right_gripper_val > 0.8
 
     def is_left_gripper_open_half(self):
         return self.left_gripper_val > 0.45
 
     def is_right_gripper_open_half(self):
+        if self.single_arm:
+            return self.is_left_gripper_open_half()
         return self.right_gripper_val > 0.45
 
     def is_left_gripper_close(self):
         return self.left_gripper_val < 0.2
 
     def is_right_gripper_close(self):
+        if self.single_arm:
+            return self.is_left_gripper_close()
         return self.right_gripper_val < 0.2
 
     # get move group joint pose
@@ -558,6 +651,8 @@ class Robot:
         return self._trans_endpose(arm_tag="left", is_endpose=False)
 
     def get_right_ee_pose(self):
+        if self.single_arm:
+            return self.get_left_ee_pose()
         return self._trans_endpose(arm_tag="right", is_endpose=False)
 
     # get gripper centor pose
@@ -565,6 +660,8 @@ class Robot:
         return self._trans_endpose(arm_tag="left", is_endpose=True)
 
     def get_right_tcp_pose(self):
+        if self.single_arm:
+            return self.get_left_tcp_pose()
         return self._trans_endpose(arm_tag="right", is_endpose=True)
 
     def get_left_orig_endpose(self):
@@ -577,6 +674,8 @@ class Robot:
             @ global_trans_matrix).tolist())
 
     def get_right_orig_endpose(self):
+        if self.single_arm:
+            return self.get_left_orig_endpose()
         pose = self.right_ee.global_pose
         global_trans_matrix = self.right_global_trans_matrix
         pose.p = pose.p - self.right_entity_origion_pose.p
@@ -589,6 +688,7 @@ class Robot:
         if arm_tag is None:
             print("No arm tag")
             return
+        arm_tag = self._normalize_arm_tag(arm_tag)
         gripper_bias = (self.left_gripper_bias if arm_tag == "left" else self.right_gripper_bias)
         global_trans_matrix = (self.left_global_trans_matrix if arm_tag == "left" else self.right_global_trans_matrix)
         delta_matrix = (self.left_delta_matrix if arm_tag == "left" else self.right_delta_matrix)
@@ -607,8 +707,10 @@ class Robot:
         entity.set_qf(qf)
 
     def set_arm_joints(self, target_position, target_velocity, arm_tag):
+        arm_tag = self._normalize_arm_tag(arm_tag)
         self._entity_qf(self.left_entity)
-        self._entity_qf(self.right_entity)
+        if self.right_entity is not self.left_entity:
+            self._entity_qf(self.right_entity)
 
         joint_lst = self.left_arm_joints if arm_tag == "left" else self.right_arm_joints
         for j in range(len(joint_lst)):
@@ -619,6 +721,9 @@ class Robot:
     def get_normal_real_gripper_val(self):
         normal_left_gripper_val = (self.left_gripper[0][0].get_drive_target()[0] - self.left_gripper_scale[0]) / (
             self.left_gripper_scale[1] - self.left_gripper_scale[0])
+        if self.single_arm:
+            normal_left_gripper_val = np.clip(normal_left_gripper_val, 0, 1)
+            return [normal_left_gripper_val, normal_left_gripper_val]
         normal_right_gripper_val = (self.right_gripper[0][0].get_drive_target()[0] - self.right_gripper_scale[0]) / (
             self.right_gripper_scale[1] - self.right_gripper_scale[0])
         normal_left_gripper_val = np.clip(normal_left_gripper_val, 0, 1)
@@ -626,8 +731,10 @@ class Robot:
         return [normal_left_gripper_val, normal_right_gripper_val]
 
     def set_gripper(self, gripper_val, arm_tag, gripper_eps=0.1):  # gripper_val in [0,1]
+        arm_tag = self._normalize_arm_tag(arm_tag)
         self._entity_qf(self.left_entity)
-        self._entity_qf(self.right_entity)
+        if self.right_entity is not self.left_entity:
+            self._entity_qf(self.right_entity)
         gripper_val = np.clip(gripper_val, 0, 1)
 
         if arm_tag == "left":

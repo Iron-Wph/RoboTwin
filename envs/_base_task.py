@@ -471,27 +471,27 @@ class Base_Task(gym.Env):
                 pkl_dic["observation"][camera_name].update(depth[camera_name])
         # endpose
         if self.data_type.get("endpose", False):
-            norm_gripper_val = [
-                self.robot.get_left_gripper_val(),
-                self.robot.get_right_gripper_val(),
-            ]
             left_endpose = self.get_arm_pose("left")
-            right_endpose = self.get_arm_pose("right")
             pkl_dic["endpose"]["left_endpose"] = left_endpose
-            pkl_dic["endpose"]["left_gripper"] = norm_gripper_val[0]
-            pkl_dic["endpose"]["right_endpose"] = right_endpose
-            pkl_dic["endpose"]["right_gripper"] = norm_gripper_val[1]
+            pkl_dic["endpose"]["left_gripper"] = self.robot.get_left_gripper_val()
+            if not self.robot.single_arm:
+                right_endpose = self.get_arm_pose("right")
+                pkl_dic["endpose"]["right_endpose"] = right_endpose
+                pkl_dic["endpose"]["right_gripper"] = self.robot.get_right_gripper_val()
         # qpos
         if self.data_type.get("qpos", False):
 
             left_jointstate = self.robot.get_left_arm_jointState()
-            right_jointstate = self.robot.get_right_arm_jointState()
 
             pkl_dic["joint_action"]["left_arm"] = left_jointstate[:-1]
             pkl_dic["joint_action"]["left_gripper"] = left_jointstate[-1]
-            pkl_dic["joint_action"]["right_arm"] = right_jointstate[:-1]
-            pkl_dic["joint_action"]["right_gripper"] = right_jointstate[-1]
-            pkl_dic["joint_action"]["vector"] = np.array(left_jointstate + right_jointstate)
+            if self.robot.single_arm:
+                pkl_dic["joint_action"]["vector"] = np.array(left_jointstate)
+            else:
+                right_jointstate = self.robot.get_right_arm_jointState()
+                pkl_dic["joint_action"]["right_arm"] = right_jointstate[:-1]
+                pkl_dic["joint_action"]["right_gripper"] = right_jointstate[-1]
+                pkl_dic["joint_action"]["vector"] = np.array(left_jointstate + right_jointstate)
         # pointcloud
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
@@ -613,6 +613,12 @@ class Base_Task(gym.Env):
         alpha = 0.5
 
         left_result, right_result = None, None
+        if self.robot.single_arm:
+            if set_tag == "right":
+                set_tag = "left"
+                left_pos = right_pos
+            elif set_tag == "together" and left_pos is None:
+                left_pos = right_pos
 
         if set_tag == "left" or set_tag == "together":
             left_result = self.robot.left_plan_grippers(self.robot.get_left_gripper_val(), left_pos)
@@ -629,7 +635,7 @@ class Base_Task(gym.Env):
             if set_tag == "left":
                 return left_result
 
-        if set_tag == "right" or set_tag == "together":
+        if not self.robot.single_arm and (set_tag == "right" or set_tag == "together"):
             right_result = self.robot.right_plan_grippers(self.robot.get_right_gripper_val(), right_pos)
             right_gripper_step = right_result["per_step"]
             right_gripper_res = right_result["result"]
@@ -806,6 +812,32 @@ class Base_Task(gym.Env):
         Will not avoid collision and will fail if the path contains collision.
         """
         if not self.plan_success:
+            return
+        if self.robot.single_arm:
+            target_pose = left_target_pose if left_target_pose is not None else right_target_pose
+            constraint_pose = left_constraint_pose if left_target_pose is not None else right_constraint_pose
+            if target_pose is None:
+                self.plan_success = False
+                return
+            if type(target_pose) == sapien.Pose:
+                target_pose = target_pose.p.tolist() + target_pose.q.tolist()
+            left_result = self.left_move_to_pose(
+                pose=target_pose,
+                constraint_pose=constraint_pose,
+                use_point_cloud=use_point_cloud,
+                use_attach=use_attach,
+            )
+            if self.plan_success is False:
+                return
+            self.take_dense_action(
+                {
+                    "left_arm": left_result,
+                    "left_gripper": None,
+                    "right_arm": None,
+                    "right_gripper": None,
+                },
+                save_freq=save_freq,
+            )
             return
         if left_target_pose is None or right_target_pose is None:
             self.plan_success = False
@@ -1415,6 +1447,11 @@ class Base_Task(gym.Env):
             control_seq["right_arm"],
             control_seq["right_gripper"],
         )
+        if self.robot.single_arm:
+            left_arm = left_arm if left_arm is not None else right_arm
+            left_gripper = left_gripper if left_gripper is not None else right_gripper
+            right_arm = None
+            right_gripper = None
 
         save_freq = self.save_freq if save_freq == -1 else save_freq
         if save_freq != None:
@@ -1492,6 +1529,9 @@ class Base_Task(gym.Env):
             self.viewer.render()
 
         actions = np.array([action])
+        if self.robot.single_arm:
+            return self._take_single_arm_action(actions, action_type)
+
         left_jointstate = self.robot.get_left_arm_jointState()
         right_jointstate = self.robot.get_right_arm_jointState()
         left_arm_dim = len(left_jointstate) - 1 if action_type == 'qpos' else 7
@@ -1665,6 +1705,95 @@ class Base_Task(gym.Env):
         if self.render_freq:  # UI
             self.viewer.render()
 
+    def _take_single_arm_action(self, actions, action_type: Literal['qpos', 'ee']):
+        jointstate = self.robot.get_left_arm_jointState()
+        arm_dim = len(jointstate) - 1 if action_type == 'qpos' else 7
+        expected_dim = arm_dim + 1
+        action = np.asarray(actions[0], dtype=np.float64).reshape(-1)
+        if action.shape[0] == expected_dim:
+            single_action = action
+        elif action.shape[0] >= expected_dim * 2:
+            single_action = action[:expected_dim]
+        else:
+            raise ValueError(
+                f"Single-arm {action_type} action should have {expected_dim} values, got {action.shape[0]}"
+            )
+
+        arm_actions = single_action[:arm_dim].reshape(1, arm_dim)
+        gripper_actions = single_action[arm_dim:].reshape(1)
+
+        if action_type == 'qpos':
+            current_qpos = np.array(jointstate[:arm_dim])
+            arm_path = np.vstack((current_qpos, arm_actions))
+            topp_flag = True
+            try:
+                times, pos, vel, acc, duration = self.robot.left_mplib_planner.TOPP(
+                    arm_path,
+                    1 / 250,
+                    verbose=True,
+                )
+                arm_result = {"position": pos, "velocity": vel}
+                arm_n_step = arm_result["position"].shape[0]
+            except Exception:
+                topp_flag = False
+                arm_n_step = 50
+
+            if arm_n_step == 0:
+                topp_flag = False
+                arm_n_step = 50
+        elif action_type == 'ee':
+            arm_result = self.robot.left_plan_path(arm_actions[0])
+            if arm_result["status"] != "Success":
+                arm_n_step = 50
+                topp_flag = False
+            else:
+                arm_n_step = arm_result["position"].shape[0]
+                topp_flag = True
+        else:
+            raise ValueError(f"Unsupported action_type: {action_type}")
+
+        current_gripper = self.robot.get_left_gripper_val()
+        gripper_path = np.hstack((current_gripper, gripper_actions))
+        mod_num = arm_n_step % len(gripper_actions)
+        gripper_step = [0] + [
+            arm_n_step // len(gripper_actions) + (1 if i < mod_num else 0)
+            for i in range(len(gripper_actions))
+        ]
+
+        gripper = []
+        for step in range(1, gripper_path.shape[0]):
+            region_gripper = np.linspace(
+                gripper_path[step - 1],
+                gripper_path[step],
+                gripper_step[step] + 1,
+            )[1:]
+            gripper = gripper + region_gripper.tolist()
+        gripper = np.array(gripper)
+
+        now_id = 0
+        while now_id < arm_n_step:
+            if topp_flag:
+                self.robot.set_arm_joints(
+                    arm_result["position"][now_id],
+                    arm_result["velocity"][now_id],
+                    "left",
+                )
+            self.robot.set_gripper(gripper[now_id], "left")
+            now_id += 1
+
+            self.scene.step()
+            self._update_render()
+
+            if self.check_success():
+                self.eval_success = True
+                self.get_obs()
+                if self.eval_video_path is not None:
+                    self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
+                return
+
+        self._update_render()
+        if self.render_freq:
+            self.viewer.render()
 
     def save_camera_images(self, task_name, step_name, generate_num_id, save_dir="./camera_images"):
         """

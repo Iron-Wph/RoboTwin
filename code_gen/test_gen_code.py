@@ -13,6 +13,7 @@ import traceback
 import os
 import time
 import inspect
+from script.embodiment import resolve_embodiment_config
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
@@ -139,21 +140,6 @@ def create_task_config(task_config_path, task_name):
         yaml.dump(task_config_template, f, default_flow_style=False, sort_keys=False)
 
 
-def get_embodiment_config(robot_file):
-    """
-    Load embodiment configuration from the robot folder.
-
-    Args:
-        robot_file (str): Path to the robot folder.
-
-    Returns:
-        dict: Robot configuration.
-    """
-    robot_config_file = os.path.join(robot_file, "config.yml")
-    with open(robot_config_file, "r", encoding="utf-8") as f:
-        return yaml.load(f.read(), Loader=yaml.FullLoader)
-
-
 def setup_task_config(task_name):
     """
     Load or create a task configuration and set up robot embodiments.
@@ -185,38 +171,8 @@ def setup_task_config(task_name):
         "random_embodiment": False,
     }
 
-    embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join("./task_config", "_embodiment_config.yml")
-    with open(embodiment_config_path, "r", encoding="utf-8") as f:
-        _embodiment_types = yaml.load(f.read(), Loader=yaml.FullLoader)
-
-    def get_embodiment_file(embodiment_type):
-        robot_file = _embodiment_types[embodiment_type]["file_path"]
-        if robot_file is None:
-            raise Exception("No embodiment files")
-        return robot_file if os.path.isabs(robot_file) else os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", robot_file)
-        )
-
-    if len(embodiment_type) == 1:
-        args["left_robot_file"] = get_embodiment_file(embodiment_type[0])
-        args["right_robot_file"] = get_embodiment_file(embodiment_type[0])
-        args["dual_arm_embodied"] = True
-    elif len(embodiment_type) == 3:
-        args["left_robot_file"] = get_embodiment_file(embodiment_type[0])
-        args["right_robot_file"] = get_embodiment_file(embodiment_type[1])
-        args["embodiment_dis"] = embodiment_type[2]
-        args["dual_arm_embodied"] = False
-    else:
-        raise Exception("Embodiment items should be 1 or 3")
-
-    args["left_embodiment_config"] = get_embodiment_config(args["left_robot_file"])
-    args["right_embodiment_config"] = get_embodiment_config(args["right_robot_file"])
-
-    args["embodiment_name"] = (
-        str(embodiment_type[0]) if len(embodiment_type) == 1
-        else str(embodiment_type[0]) + "+" + str(embodiment_type[1])
-    )
+    args = resolve_embodiment_config(args, embodiment_config_path)
 
     args["need_plan"] = True
     args["save_path"] = "./data/test"

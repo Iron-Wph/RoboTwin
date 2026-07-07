@@ -31,8 +31,8 @@ def eval(TASK_ENV, model, observation):
 
     for action in actions:  # Execute each step of the action
         # see for https://robotwin-platform.github.io/doc/control-robot.md more details
-        TASK_ENV.take_action(action, action_type='qpos') # joint control: [left_arm_joints + left_gripper + right_arm_joints + right_gripper]
-        # TASK_ENV.take_action(action, action_type='ee') # endpose control: [left_end_effector_pose (xyz + quaternion) + left_gripper + right_end_effector_pose + right_gripper]
+        TASK_ENV.take_action(action, action_type='qpos') # single arm: [arm_joints + gripper]; dual arm: [left_arm_joints + left_gripper + right_arm_joints + right_gripper]
+        # TASK_ENV.take_action(action, action_type='ee') # single arm: [end_effector_pose (xyz + quaternion) + gripper]; dual arm: [left_end_effector_pose + left_gripper + right_end_effector_pose + right_gripper]
         # TASK_ENV.take_action(action, action_type='delta_ee') # delta endpose control: [left_end_effector_delta (xyz + quaternion) + left_gripper + right_end_effector_delta + right_gripper]
         observation = TASK_ENV.get_obs()
         obs = encode_obs(observation)

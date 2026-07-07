@@ -20,6 +20,7 @@ import argparse
 import pdb
 
 from generate_episode_instructions import *
+from script.embodiment import resolve_embodiment_config
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
@@ -54,13 +55,6 @@ def get_camera_config(camera_type):
     return args[camera_type]
 
 
-def get_embodiment_config(robot_file):
-    robot_config_file = os.path.join(robot_file, "config.yml")
-    with open(robot_config_file, "r", encoding="utf-8") as f:
-        embodiment_args = yaml.load(f.read(), Loader=yaml.FullLoader)
-    return embodiment_args
-
-
 def main(usr_args):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     task_name = usr_args["task_name"]
@@ -82,17 +76,9 @@ def main(usr_args):
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
 
-    embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
-
-    with open(embodiment_config_path, "r", encoding="utf-8") as f:
-        _embodiment_types = yaml.load(f.read(), Loader=yaml.FullLoader)
-
-    def get_embodiment_file(embodiment_type):
-        robot_file = _embodiment_types[embodiment_type]["file_path"]
-        if robot_file is None:
-            raise "No embodiment files"
-        return robot_file
+    args = resolve_embodiment_config(args, embodiment_config_path)
+    embodiment_name = args["embodiment_name"]
 
     with open(CONFIGS_PATH + "_camera_config.yml", "r", encoding="utf-8") as f:
         _camera_config = yaml.load(f.read(), Loader=yaml.FullLoader)
@@ -100,26 +86,6 @@ def main(usr_args):
     head_camera_type = args["camera"]["head_camera_type"]
     args["head_camera_h"] = _camera_config[head_camera_type]["h"]
     args["head_camera_w"] = _camera_config[head_camera_type]["w"]
-
-    if len(embodiment_type) == 1:
-        args["left_robot_file"] = get_embodiment_file(embodiment_type[0])
-        args["right_robot_file"] = get_embodiment_file(embodiment_type[0])
-        args["dual_arm_embodied"] = True
-    elif len(embodiment_type) == 3:
-        args["left_robot_file"] = get_embodiment_file(embodiment_type[0])
-        args["right_robot_file"] = get_embodiment_file(embodiment_type[1])
-        args["embodiment_dis"] = embodiment_type[2]
-        args["dual_arm_embodied"] = False
-    else:
-        raise "embodiment items should be 1 or 3"
-
-    args["left_embodiment_config"] = get_embodiment_config(args["left_robot_file"])
-    args["right_embodiment_config"] = get_embodiment_config(args["right_robot_file"])
-
-    if len(embodiment_type) == 1:
-        embodiment_name = str(embodiment_type[0])
-    else:
-        embodiment_name = str(embodiment_type[0]) + "+" + str(embodiment_type[1])
 
     save_dir = Path(f"eval_result/{task_name}/{policy_name}/{task_config}/{ckpt_setting}/{current_time}")
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -153,7 +119,9 @@ def main(usr_args):
     TASK_ENV = class_decorator(args["task_name"])
     args["policy_name"] = policy_name
     usr_args["left_arm_dim"] = len(args["left_embodiment_config"]["arm_joints_name"][0])
-    usr_args["right_arm_dim"] = len(args["right_embodiment_config"]["arm_joints_name"][1])
+    usr_args["right_arm_dim"] = (
+        0 if args.get("single_arm_embodied") else len(args["right_embodiment_config"]["arm_joints_name"][1])
+    )
 
     seed = usr_args["seed"]
 
