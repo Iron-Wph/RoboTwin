@@ -33,6 +33,8 @@ logging.basicConfig(
 )
 logging.getLogger("concurrent.futures").setLevel(logging.WARNING)
 logging.getLogger("curobo").setLevel(logging.ERROR)
+_LOGGED_SINGLE_ARM_STATE_KEYS = set()
+_LOGGED_ACTION_DIM_CONFIGS = set()
 
 
 def class_decorator(task_name):
@@ -55,10 +57,44 @@ def update_obs(observation, args=None):
         arm_key = f"{active_arm}_arm"
         gripper_key = f"{active_arm}_gripper"
         joint_action = observation["joint_action"]
+        available_keys = tuple(joint_action.keys())
+        missing_keys = [
+            key for key in (arm_key, gripper_key) if key not in joint_action
+        ]
+        log_key = (active_arm, available_keys)
+        if log_key not in _LOGGED_SINGLE_ARM_STATE_KEYS:
+            _LOGGED_SINGLE_ARM_STATE_KEYS.add(log_key)
+            logging.warning(
+                "RoboTwin single-arm state key check: active_arm=%s, "
+                "arm_key=%s exists=%s, gripper_key=%s exists=%s, "
+                "available_joint_action_keys=%s",
+                active_arm,
+                arm_key,
+                arm_key in joint_action,
+                gripper_key,
+                gripper_key in joint_action,
+                list(available_keys),
+            )
+        if missing_keys:
+            raise KeyError(
+                "RoboTwin single-arm state key mismatch: "
+                f"active_arm={active_arm}, missing_keys={missing_keys}, "
+                f"available_joint_action_keys={list(available_keys)}"
+            )
         state = np.array(
             list(joint_action[arm_key]) + [joint_action[gripper_key]],
             dtype=np.float32,
         )
+        shape_log_key = (active_arm, state.shape)
+        if shape_log_key not in _LOGGED_SINGLE_ARM_STATE_KEYS:
+            _LOGGED_SINGLE_ARM_STATE_KEYS.add(shape_log_key)
+            logging.warning(
+                "RoboTwin single-arm state assembled: active_arm=%s, "
+                "state_shape=%s, expected_dim=%d",
+                active_arm,
+                state.shape,
+                len(joint_action[arm_key]) + 1,
+            )
         if active_arm == "left":
             right_wrist_image = None
         else:
@@ -338,9 +374,43 @@ class VectorEnv(gym.Env):
         right_arm_dim = len(args["right_embodiment_config"]["arm_joints_name"][1])
         if args.get("single_arm", False):
             active_arm = args.get("active_arm", "right")
-            args["action_dim"] = (left_arm_dim if active_arm == "left" else right_arm_dim) + 1
+            if active_arm not in ("left", "right"):
+                raise ValueError(
+                    f"active_arm must be 'left' or 'right', got {active_arm}"
+                )
+            selected_arm_dim = left_arm_dim if active_arm == "left" else right_arm_dim
+            args["action_dim"] = selected_arm_dim + 1
+            action_layout = f"{active_arm}_arm({selected_arm_dim}) + {active_arm}_gripper(1)"
         else:
             args["action_dim"] = left_arm_dim + 1 + right_arm_dim + 1
+            active_arm = "dual"
+            action_layout = (
+                f"left_arm({left_arm_dim}) + left_gripper(1) + "
+                f"right_arm({right_arm_dim}) + right_gripper(1)"
+            )
+
+        action_dim_log_key = (
+            embodiment_name,
+            bool(args.get("single_arm", False)),
+            active_arm,
+            left_arm_dim,
+            right_arm_dim,
+            args["action_dim"],
+        )
+        if action_dim_log_key not in _LOGGED_ACTION_DIM_CONFIGS:
+            _LOGGED_ACTION_DIM_CONFIGS.add(action_dim_log_key)
+            logging.warning(
+                "RoboTwin action dim check: embodiment=%s, single_arm=%s, "
+                "active_arm=%s, left_arm_dim=%d, right_arm_dim=%d, "
+                "action_dim=%d, layout=%s",
+                embodiment_name,
+                bool(args.get("single_arm", False)),
+                active_arm,
+                left_arm_dim,
+                right_arm_dim,
+                args["action_dim"],
+                action_layout,
+            )
 
         args["eval_mode"] = True
         args["eval_video_log"] = False
