@@ -527,7 +527,7 @@ class Base_Task(gym.Env):
     def _single_arm_action_dim(self):
         return len(self._arm_joint_state(self._active_arm()))
 
-    def _normalize_single_arm_chunk_actions(self, chunk_actions):
+    def _prepare_single_arm_actions(self, chunk_actions):
         actions = np.asarray(chunk_actions)
         if actions.ndim == 1:
             actions = actions[None, :]
@@ -538,6 +538,147 @@ class Base_Task(gym.Env):
                 f"expected {expected_dim}, got {actions.shape[-1]}"
             )
         return actions
+
+    def _normalize_single_arm_chunk_actions(self, chunk_actions):
+        return self._prepare_single_arm_actions(chunk_actions)
+
+    def _plan_single_arm_qpos_path(self, arm_tag, arm_path, downsample=True):
+        topp_flag = True
+        try:
+            times, pos, vel, acc, duration = self._arm_mplib_planner(arm_tag).TOPP(
+                arm_path, 1 / 250, verbose=True
+            )
+            if downsample:
+                pos, vel = self.downsample_trajectory(pos, vel)
+            result = {"position": pos, "velocity": vel}
+            n_step = result["position"].shape[0]
+        except Exception:
+            topp_flag = False
+            result = None
+            n_step = 50
+
+        if n_step == 0:
+            topp_flag = False
+            result = None
+            n_step = 50
+        return topp_flag, result, n_step
+
+    def _interpolate_gripper_path(self, gripper_path, n_step, action_count):
+        mod_num = n_step % action_count
+        gripper_step = [0] + [
+            n_step // action_count + (1 if i < mod_num else 0)
+            for i in range(action_count)
+        ]
+
+        gripper = []
+        for idx in range(1, gripper_path.shape[0]):
+            region = np.linspace(
+                gripper_path[idx - 1],
+                gripper_path[idx],
+                gripper_step[idx] + 1,
+            )[1:]
+            gripper = gripper + region.tolist()
+        return np.array(gripper)
+
+    def _execute_single_arm_qpos_actions(self, actions, downsample=True):
+        actions = self._prepare_single_arm_actions(actions)
+        arm_tag = self._active_arm()
+        jointstate = self._arm_joint_state(arm_tag)
+        arm_dim = len(jointstate) - 1
+
+        arm_actions = actions[:, :arm_dim]
+        gripper_actions = actions[:, arm_dim]
+        current_qpos = np.array(jointstate[:arm_dim])
+        current_gripper = np.array(jointstate[arm_dim:arm_dim + 1])
+
+        arm_path = np.vstack((current_qpos, arm_actions))
+        gripper_path = np.hstack((current_gripper, gripper_actions))
+        arm_path = self.compress_path(arm_path)
+
+        topp_flag, result, n_step = self._plan_single_arm_qpos_path(
+            arm_tag, arm_path, downsample=downsample
+        )
+        gripper = self._interpolate_gripper_path(
+            gripper_path, n_step, len(gripper_actions)
+        )
+
+        now_id = 0
+        while now_id < n_step:
+            if topp_flag:
+                self._set_arm_joints(
+                    arm_tag,
+                    result["position"][now_id],
+                    result["velocity"][now_id],
+                )
+            if not self.fix_gripper:
+                self._set_arm_gripper(arm_tag, gripper[now_id])
+
+            now_id += 1
+            self.scene.step()
+            self._update_render()
+
+            if self.check_success():
+                self.eval_success = True
+                return True
+        return False
+
+    def _current_episode_arm_snapshots(self):
+        if self._single_arm_enabled():
+            arm_tag = self._active_arm()
+            eef_pose = np.array(self._arm_ee_pose(arm_tag))
+            joint_state = np.array(self._arm_joint_state(arm_tag))
+            gripper_open = self._arm_gripper_open(arm_tag)
+            return (
+                eef_pose,
+                eef_pose.copy(),
+                joint_state,
+                joint_state.copy(),
+                gripper_open,
+                gripper_open,
+            )
+
+        return (
+            np.array(self.robot.get_left_ee_pose()),
+            np.array(self.robot.get_right_ee_pose()),
+            np.array(self.robot.get_left_arm_jointState()),
+            np.array(self.robot.get_right_arm_jointState()),
+            self.robot.is_left_gripper_open(),
+            self.robot.is_right_gripper_open(),
+        )
+
+    def _reset_episode_arm_traces(self):
+        (
+            left_eef_pose,
+            right_eef_pose,
+            left_joint_state,
+            right_joint_state,
+            left_gripper_open,
+            right_gripper_open,
+        ) = self._current_episode_arm_snapshots()
+
+        self.episode_left_eef_poses = [left_eef_pose]
+        self.episode_right_eef_poses = [right_eef_pose]
+        self.episode_left_joint_states = [left_joint_state]
+        self.episode_right_joint_states = [right_joint_state]
+        self.episode_left_gripper_state = [left_gripper_open]
+        self.episode_right_gripper_state = [right_gripper_open]
+
+    def _append_episode_arm_traces(self):
+        (
+            left_eef_pose,
+            right_eef_pose,
+            left_joint_state,
+            right_joint_state,
+            left_gripper_open,
+            right_gripper_open,
+        ) = self._current_episode_arm_snapshots()
+
+        self.episode_left_eef_poses.append(left_eef_pose)
+        self.episode_right_eef_poses.append(right_eef_pose)
+        self.episode_left_joint_states.append(left_joint_state)
+        self.episode_right_joint_states.append(right_joint_state)
+        self.episode_left_gripper_state.append(left_gripper_open)
+        self.episode_right_gripper_state.append(right_gripper_open)
 
     def get_obs(self):
         self._update_render()
@@ -1629,7 +1770,31 @@ class Base_Task(gym.Env):
 
     def take_action(self, action, action_type:Literal['qpos', 'ee']='qpos'):  # action_type: qpos or ee
         if self._single_arm_enabled():
-            self._gen_sparse_reward_data_single_arm(action, action_type)
+            if action_type != "qpos":
+                raise NotImplementedError("single-arm RoboTwin RL currently supports qpos actions only")
+            if self.take_action_cnt == self.step_lim or self.eval_success:
+                return
+            eval_video_freq = 1
+            if (
+                self.eval_video_path is not None
+                and self.take_action_cnt % eval_video_freq == 0
+            ):
+                self.eval_video_ffmpeg.stdin.write(
+                    self.now_obs["observation"]["head_camera"]["rgb"].tobytes()
+                )
+            actions = self._prepare_single_arm_actions(action)
+            self.take_action_cnt += actions.shape[0]
+            print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", end="\r")
+            self._update_render()
+            if self.render_freq:
+                self.viewer.render()
+            success = self._execute_single_arm_qpos_actions(actions, downsample=False)
+            if success:
+                self.get_obs()
+                if self.eval_video_path is not None:
+                    self.eval_video_ffmpeg.stdin.write(
+                        self.now_obs["observation"]["head_camera"]["rgb"].tobytes()
+                    )
             return
 
         if self.take_action_cnt == self.step_lim or self.eval_success:
@@ -1861,78 +2026,18 @@ class Base_Task(gym.Env):
             truncation = np.array([1], dtype=np.int32)
             return reward, termination, truncation, infos
 
-        actions = self._normalize_single_arm_chunk_actions(chunk_actions)
+        actions = self._prepare_single_arm_actions(chunk_actions)
         self.take_action_cnt += actions.shape[0]
 
         self._update_render()
         if self.render_freq:
             self.viewer.render()
 
-        arm_tag = self._active_arm()
-        jointstate = self._arm_joint_state(arm_tag)
-        arm_dim = len(jointstate) - 1
-
-        arm_actions = actions[:, :arm_dim]
-        gripper_actions = actions[:, arm_dim]
-        current_qpos = np.array(jointstate[:arm_dim])
-        current_gripper = np.array(jointstate[arm_dim:arm_dim + 1])
-
-        arm_path = np.vstack((current_qpos, arm_actions))
-        gripper_path = np.hstack((current_gripper, gripper_actions))
-        arm_path = self.compress_path(arm_path)
-
-        topp_flag = True
-        try:
-            times, pos, vel, acc, duration = self._arm_mplib_planner(arm_tag).TOPP(
-                arm_path, 1 / 250, verbose=True
-            )
-            pos, vel = self.downsample_trajectory(pos, vel)
-            result = {"position": pos, "velocity": vel}
-            n_step = result["position"].shape[0]
-        except Exception:
-            topp_flag = False
-            n_step = 50
-
-        if n_step == 0:
-            topp_flag = False
-            n_step = 50
-
-        mod_num = n_step % len(gripper_actions)
-        gripper_step = [0] + [
-            n_step // len(gripper_actions) + (1 if i < mod_num else 0)
-            for i in range(len(gripper_actions))
-        ]
-
-        gripper = []
-        for idx in range(1, gripper_path.shape[0]):
-            region = np.linspace(
-                gripper_path[idx - 1],
-                gripper_path[idx],
-                gripper_step[idx] + 1,
-            )[1:]
-            gripper = gripper + region.tolist()
-        gripper = np.array(gripper)
-
-        now_id = 0
-        while now_id < n_step:
-            if topp_flag:
-                self._set_arm_joints(
-                    arm_tag,
-                    result["position"][now_id],
-                    result["velocity"][now_id],
-                )
-            self._set_arm_gripper(arm_tag, gripper[now_id])
-
-            now_id += 1
-            self.scene.step()
-            self._update_render()
-
-            if self.check_success():
-                self.eval_success = True
-                infos["success"] = True
-                reward = np.array([1], dtype=np.float32)
-                termination = np.array([1], dtype=np.int32)
-                return reward, termination, truncation, infos
+        if self._execute_single_arm_qpos_actions(actions, downsample=True):
+            infos["success"] = True
+            reward = np.array([1], dtype=np.float32)
+            termination = np.array([1], dtype=np.int32)
+            return reward, termination, truncation, infos
 
         if getattr(self, "eval_success", False):
             infos["success"] = True
@@ -2277,18 +2382,80 @@ class Base_Task(gym.Env):
             take_actions = model.get_action()
             action_traj.append(take_actions)
 
-            self.episode_left_eef_poses = [self.robot.get_left_ee_pose()]
-            self.episode_right_eef_poses = [self.robot.get_right_ee_pose()]
-            self.episode_left_joint_states = [self.robot.get_left_arm_jointState()]
-            self.episode_right_joint_states = [self.robot.get_right_arm_jointState()]
-            self.episode_left_gripper_state = [self.robot.is_left_gripper_open()]
-            self.episode_right_gripper_state = [self.robot.is_right_gripper_open()]
+            self._reset_episode_arm_traces()
 
             # for step in range(args['rdt_step']):
             for step in range(args['rdt_step']):
                 actions = np.array([take_actions[step]])
                 if actions.ndim == 1:
                     actions = actions[None, :]
+                if self._single_arm_enabled():
+                    self._execute_single_arm_qpos_actions(actions, downsample=False)
+                    self._append_episode_arm_traces()
+
+                    self._update_render()
+                    observation = self.get_obs()
+                    obs = update_func(observation)
+                    model.update_obs(obs)
+
+                    if eval_video_log:
+                        position = (10, 50)  # 鏂囧瓧浣嶇疆 (x, y)
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 1  # 瀛椾綋澶у皬
+                        font_color = (0, 0, 0)  # 瀛椾綋棰滆壊 (BGR)
+                        thickness = 2  # 瀛椾綋绮楃粏
+                        put_text = ""
+                        if not label_traj:
+                            put_text = "None:"
+                        else:
+                            put_text = label_traj[-1] + ":"
+                        if not reward_traj:
+                            put_text += "0"
+                        else:
+                            put_text += str(np.sum(reward_traj))
+
+                        image = observation['observation']['head_camera']['rgb']
+                        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                        cv2.putText(image, put_text, position, font, font_scale, font_color, thickness)
+
+                        ffmpeg.stdin.write(image.tobytes())
+
+                    if self.render_freq:
+                        self.viewer.render()
+
+                    cnt += 1
+                    print(f'step: {cnt} / {self.step_lim}', end='\r')
+
+                    self.reward.update_subtask()
+                    if self.reward.is_fail() or cnt >= self.step_lim:
+                        print("\nfail!")
+                        if eval_video_log:
+                            ffmpeg.stdin.close()
+                            ffmpeg.wait()
+                            del ffmpeg
+                        success = 0
+                        reward = 0
+                        reward_traj.append(reward)
+                        label_traj.append("fail")
+                        return obs_traj, action_traj, reward_traj, label_traj, success
+
+                    if self.reward.is_success():
+                        print("\nsuccess!")
+                        self.suc +=1
+                        if eval_video_log:
+                            ffmpeg.stdin.close()
+                            ffmpeg.wait()
+                            del ffmpeg
+
+                        reward = 1
+                        reward_traj.append(reward)
+                        label_traj.append("success")
+
+                        success = 1
+                        return obs_traj, action_traj, reward_traj, label_traj, success
+
+                    continue
+
                 left_jointstate = self.robot.get_left_arm_jointState()
                 right_jointstate = self.robot.get_right_arm_jointState()
                 current_jointstate = np.array(left_jointstate + right_jointstate)
@@ -2428,12 +2595,7 @@ class Base_Task(gym.Env):
                     if self.actor_pose == False:
                         break
                 
-                self.episode_left_eef_poses.append(np.array(self.robot.get_left_ee_pose()))
-                self.episode_right_eef_poses.append(np.array(self.robot.get_right_ee_pose()))
-                self.episode_left_joint_states.append(np.array(self.robot.get_left_arm_jointState()))
-                self.episode_right_joint_states.append(np.array(self.robot.get_right_arm_jointState()))
-                self.episode_left_gripper_state.append(self.robot.is_left_gripper_open())
-                self.episode_right_gripper_state.append(self.robot.is_right_gripper_open())
+                self._append_episode_arm_traces()
 
                 self._update_render()
                 observation = self.get_obs()
@@ -2540,17 +2702,39 @@ class Base_Task(gym.Env):
 
         # return obs, reward, termination, truncation, infos
         # 辅助计算reward用的
-        self.episode_left_eef_poses = [self.robot.get_left_ee_pose()]
-        self.episode_right_eef_poses = [self.robot.get_right_ee_pose()]
-        self.episode_left_joint_states = [self.robot.get_left_arm_jointState()]
-        self.episode_right_joint_states = [self.robot.get_right_arm_jointState()]
-        self.episode_left_gripper_state = [self.robot.is_left_gripper_open()]
-        self.episode_right_gripper_state = [self.robot.is_right_gripper_open()]
+        self._reset_episode_arm_traces()
 
         for step in range(chunk_actions.shape[0]):
             actions = np.asarray(chunk_actions[step])
             if actions.ndim == 1:
                 actions = actions[None, :]
+            if self._single_arm_enabled():
+                self._execute_single_arm_qpos_actions(actions, downsample=True)
+                if step > chunk_actions.shape[0] - 3:
+                    obs_return.append(self.get_obs())
+
+                self._update_render()
+                self._append_episode_arm_traces()
+
+                self.reward.update()
+
+                self.run_steps += 1
+
+                if self.check_success():
+                    self.eval_success = True
+                    reward = np.array([1])
+                    termination = np.array([1])
+                    infos["success"] = True
+
+                if self.run_steps >= self.step_lim:
+                    truncation = np.array([1])
+                    return obs_return, reward, termination, truncation, infos
+
+                if self.eval_success:
+                    return obs_return, reward, termination, truncation, infos
+
+                continue
+
             left_jointstate = self.robot.get_left_arm_jointState()
             right_jointstate = self.robot.get_right_arm_jointState()
             current_jointstate = np.array(left_jointstate + right_jointstate)
@@ -2692,12 +2876,7 @@ class Base_Task(gym.Env):
 
             self._update_render()
 
-            self.episode_left_eef_poses.append(np.array(self.robot.get_left_ee_pose()))
-            self.episode_right_eef_poses.append(np.array(self.robot.get_right_ee_pose()))
-            self.episode_left_joint_states.append(np.array(self.robot.get_left_arm_jointState()))
-            self.episode_right_joint_states.append(np.array(self.robot.get_right_arm_jointState()))
-            self.episode_left_gripper_state.append(self.robot.is_left_gripper_open())
-            self.episode_right_gripper_state.append(self.robot.is_right_gripper_open())
+            self._append_episode_arm_traces()
 
             # TODO:添加状态转移判定方程
             self.reward.update()

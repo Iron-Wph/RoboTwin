@@ -29,6 +29,9 @@ class Robot:
 
         self.planner_backend = kwargs.get("planner_backend", "curobo")
         self.single_arm = kwargs.get("single_arm", False)
+        self.active_arm = kwargs.get("active_arm", "right")
+        if self.active_arm not in ("left", "right"):
+            raise ValueError(f"active_arm must be 'left' or 'right', not {self.active_arm}")
 
         self.left_js = None
         self.right_js = None
@@ -140,6 +143,12 @@ class Robot:
 
         self.init_joints()
 
+    def _single_arm_enabled(self):
+        return getattr(self, "single_arm", False)
+
+    def _active_arm(self):
+        return getattr(self, "active_arm", "right")
+
     def get_grasp_perfect_direction(self, arm_tag):
         if arm_tag == "left":
             return self.left_perfect_direction
@@ -231,6 +240,17 @@ class Robot:
             )
 
     def move_to_homestate(self):
+        if self._single_arm_enabled():
+            if self._active_arm() == "left":
+                joint_list = self.left_arm_joints
+                homestate = self.left_homestate
+            else:
+                joint_list = self.right_arm_joints
+                homestate = self.right_homestate
+            for i, joint in enumerate(joint_list):
+                joint.set_drive_target(homestate[i])
+            return
+
         for i, joint in enumerate(self.left_arm_joints):
             joint.set_drive_target(self.left_homestate[i])
 
@@ -570,23 +590,28 @@ class Robot:
             return 0
         return self.right_gripper_val
 
+    def _status_gripper_val(self, arm_tag):
+        if self._single_arm_enabled():
+            arm_tag = self._active_arm()
+        return self.left_gripper_val if arm_tag == "left" else self.right_gripper_val
+
     def is_left_gripper_open(self):
-        return self.left_gripper_val > 0.8
+        return self._status_gripper_val("left") > 0.8
 
     def is_right_gripper_open(self):
-        return self.right_gripper_val > 0.8
+        return self._status_gripper_val("right") > 0.8
 
     def is_left_gripper_open_half(self):
-        return self.left_gripper_val > 0.45
+        return self._status_gripper_val("left") > 0.45
 
     def is_right_gripper_open_half(self):
-        return self.right_gripper_val > 0.45
+        return self._status_gripper_val("right") > 0.45
 
     def is_left_gripper_close(self):
-        return self.left_gripper_val < 0.2
+        return self._status_gripper_val("left") < 0.2
 
     def is_right_gripper_close(self):
-        return self.right_gripper_val < 0.2
+        return self._status_gripper_val("right") < 0.2
 
     # get move group joint pose
     def get_left_ee_pose(self):
