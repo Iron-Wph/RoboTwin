@@ -18,6 +18,8 @@ if [[ "${TASK_CONFIG}" == "franka_smoke" || ! -f "task_config/${TASK_CONFIG}.yml
   bash tools/make_franka_smoke_config.sh
 fi
 
+python tools/fix_embodiment_asset_paths.py
+
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 
 PYTHONWARNINGS=ignore::UserWarning \

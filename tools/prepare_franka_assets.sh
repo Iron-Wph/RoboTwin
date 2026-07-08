@@ -17,6 +17,8 @@ else
   bash script/_download_assets.sh
 fi
 
+python tools/fix_embodiment_asset_paths.py
+
 python script/test_render.py
 
 python - <<'PY'
