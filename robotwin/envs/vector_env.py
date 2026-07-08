@@ -2,6 +2,7 @@ import importlib
 import os
 import gc
 import sys
+import json
 
 import cv2
 import torch
@@ -35,6 +36,39 @@ logging.getLogger("concurrent.futures").setLevel(logging.WARNING)
 logging.getLogger("curobo").setLevel(logging.ERROR)
 _LOGGED_SINGLE_ARM_STATE_KEYS = set()
 _LOGGED_ACTION_DIM_CONFIGS = set()
+
+
+def _debug_log_path(args=None):
+    log_path = os.getenv("ROBOTWIN_DEBUG_LOG_PATH")
+    if args is not None:
+        configured_log_path = args.get("debug_log_path")
+        if configured_log_path:
+            log_path = configured_log_path
+        if not log_path and args.get("save_path"):
+            log_path = os.path.join(args["save_path"], "robotwin_debug.jsonl")
+    if not log_path:
+        log_path = os.path.join(os.getcwd(), "robotwin_debug.jsonl")
+    return os.path.abspath(os.path.expanduser(log_path))
+
+
+def _write_debug_record(event, args=None, **fields):
+    log_path = _debug_log_path(args)
+    record = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "pid": os.getpid(),
+        "event": event,
+        **fields,
+    }
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception as exc:
+        logging.warning(
+            "Failed to write RoboTwin debug log to %s: %s",
+            log_path,
+            exc,
+        )
 
 
 def class_decorator(task_name):
@@ -75,7 +109,26 @@ def update_obs(observation, args=None):
                 gripper_key in joint_action,
                 list(available_keys),
             )
+            _write_debug_record(
+                "single_arm_state_key_check",
+                args,
+                active_arm=active_arm,
+                arm_key=arm_key,
+                arm_key_exists=arm_key in joint_action,
+                gripper_key=gripper_key,
+                gripper_key_exists=gripper_key in joint_action,
+                available_joint_action_keys=list(available_keys),
+                debug_log_path=_debug_log_path(args),
+            )
         if missing_keys:
+            _write_debug_record(
+                "single_arm_state_key_mismatch",
+                args,
+                active_arm=active_arm,
+                missing_keys=missing_keys,
+                available_joint_action_keys=list(available_keys),
+                debug_log_path=_debug_log_path(args),
+            )
             raise KeyError(
                 "RoboTwin single-arm state key mismatch: "
                 f"active_arm={active_arm}, missing_keys={missing_keys}, "
@@ -94,6 +147,15 @@ def update_obs(observation, args=None):
                 active_arm,
                 state.shape,
                 len(joint_action[arm_key]) + 1,
+            )
+            _write_debug_record(
+                "single_arm_state_assembled",
+                args,
+                active_arm=active_arm,
+                state_shape=list(state.shape),
+                expected_dim=len(joint_action[arm_key]) + 1,
+                state_dtype=str(state.dtype),
+                debug_log_path=_debug_log_path(args),
             )
         if active_arm == "left":
             right_wrist_image = None
@@ -410,6 +472,18 @@ class VectorEnv(gym.Env):
                 right_arm_dim,
                 args["action_dim"],
                 action_layout,
+            )
+            _write_debug_record(
+                "action_dim_check",
+                args,
+                embodiment=embodiment_name,
+                single_arm=bool(args.get("single_arm", False)),
+                active_arm=active_arm,
+                left_arm_dim=left_arm_dim,
+                right_arm_dim=right_arm_dim,
+                action_dim=args["action_dim"],
+                action_layout=action_layout,
+                debug_log_path=_debug_log_path(args),
             )
 
         args["eval_mode"] = True
