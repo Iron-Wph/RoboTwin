@@ -26,10 +26,11 @@ def main(path):
         require_missing(joint_action, "right_arm")
         require_missing(joint_action, "right_gripper")
 
-        for name in ["head_camera", "left_camera"]:
+        for name in ["head_camera", "third_view"]:
             if name not in observation:
                 raise AssertionError(f"Missing observation/{name}")
 
+        require_missing(observation, "left_camera")
         require_missing(observation, "right_camera")
 
         for name in ["left_endpose", "left_gripper"]:
