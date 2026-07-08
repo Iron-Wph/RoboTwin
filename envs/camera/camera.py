@@ -73,9 +73,16 @@ class Camera:
         # with open(robot_config_file, 'r', encoding='utf-8') as f:
         #     embodiment_args = yaml.load(f.read(), Loader=yaml.FullLoader)
         # TODO
-        self.static_camera_info_list = deepcopy(
-            camera_config.get("static_camera_list", kwags["left_embodiment_config"]["static_camera_list"])
-        )
+        self.static_camera_info_list = deepcopy(kwags["left_embodiment_config"]["static_camera_list"])
+        camera_overrides = {
+            camera_info["name"]: deepcopy(camera_info)
+            for camera_info in camera_config.get("static_camera_list", [])
+            if "name" in camera_info
+        }
+        for camera_info in self.static_camera_info_list:
+            override = camera_overrides.get(camera_info.get("name"))
+            if override is not None:
+                camera_info.update(override)
         self.static_camera_num = len(self.static_camera_info_list)
 
     def load_camera(self, scene):
