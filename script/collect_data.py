@@ -14,6 +14,12 @@ import traceback
 import os
 import time
 from argparse import ArgumentParser
+from script.camera_config import (
+    get_collect_head_camera,
+    get_collect_wrist_camera,
+    get_head_camera_type,
+    get_wrist_camera_type,
+)
 from script.embodiment import resolve_embodiment_config
 
 current_file_path = os.path.abspath(__file__)
@@ -56,10 +62,10 @@ def main(task_name=None, task_config=None):
     print("\033[95mRandom Table Height:\033[0m " + str(args["domain_randomization"]["random_table_height"]))
     print("\033[95mRandom Head Camera Distance:\033[0m " + str(args["domain_randomization"]["random_head_camera_dis"]))
 
-    print("\033[94mHead Camera Config:\033[0m " + str(args["camera"]["head_camera_type"]) + f", " +
-          str(args["camera"]["collect_head_camera"]))
-    print("\033[94mWrist Camera Config:\033[0m " + str(args["camera"]["wrist_camera_type"]) + f", " +
-          str(args["camera"]["collect_wrist_camera"]))
+    print("\033[94mHead Camera Config:\033[0m " + str(get_head_camera_type(args["camera"])) + f", " +
+          str(get_collect_head_camera(args["camera"])))
+    print("\033[94mWrist Camera Config:\033[0m " + str(get_wrist_camera_type(args["camera"])) + f", " +
+          str(get_collect_wrist_camera(args["camera"])))
     print("\033[94mEmbodiment Config:\033[0m " + embodiment_name)
     print("\n==================================")
 

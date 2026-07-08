@@ -14,10 +14,18 @@ domain_randomization:
   random_light: false
   crazy_random_light_rate: 0
 camera:
-  head_camera_type: D435
-  wrist_camera_type: D435
-  collect_head_camera: true
-  collect_wrist_camera: true
+  collect_wrist_camera: false
+  static_camera_list:
+    - name: head_camera
+      type: D435
+      position: [0.0, 0.85, 1.55]
+      forward: [0.0, -0.82, -0.57]
+      left: [1.0, 0.0, 0.0]
+    - name: third_view
+      type: D435
+      position: [0.85, -1.35, 1.35]
+      forward: [-0.42, 0.74, -0.52]
+      left: [-0.87, -0.49, 0.0]
 data_type:
   rgb: true
   third_view: false

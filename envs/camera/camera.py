@@ -13,6 +13,7 @@ import math
 from .._GLOBAL_CONFIGS import CONFIGS_PATH
 import os
 from sapien.sensor import StereoDepthSensor, StereoDepthSensorConfig
+from copy import deepcopy
 
 try:
     import pytorch3d.ops as torch3d_ops
@@ -52,11 +53,12 @@ class Camera:
         self.random_head_camera_dis = random_head_camera_dis
 
         self.static_camera_config = []
-        self.head_camera_type = kwags["camera"].get("head_camera_type", "D435")
-        self.wrist_camera_type = kwags["camera"].get("wrist_camera_type", "D435")
+        camera_config = kwags["camera"]
+        self.head_camera_type = camera_config.get("head_camera_type")
+        self.wrist_camera_type = camera_config.get("wrist_camera_type", "D435")
 
-        self.collect_head_camera = kwags["camera"].get("collect_head_camera", True)
-        self.collect_wrist_camera = kwags["camera"].get("collect_wrist_camera", True)
+        self.collect_head_camera = camera_config.get("collect_head_camera", True)
+        self.collect_wrist_camera = camera_config.get("collect_wrist_camera", True)
         self.single_arm = kwags.get("single_arm_embodied", False)
 
         # embodiment = kwags.get('embodiment')
@@ -71,7 +73,9 @@ class Camera:
         # with open(robot_config_file, 'r', encoding='utf-8') as f:
         #     embodiment_args = yaml.load(f.read(), Loader=yaml.FullLoader)
         # TODO
-        self.static_camera_info_list = kwags["left_embodiment_config"]["static_camera_list"]
+        self.static_camera_info_list = deepcopy(
+            camera_config.get("static_camera_list", kwags["left_embodiment_config"]["static_camera_list"])
+        )
         self.static_camera_num = len(self.static_camera_info_list)
 
     def load_camera(self, scene):
@@ -187,7 +191,9 @@ class Camera:
             if camera_info["name"] == "head_camera":
                 if self.collect_head_camera:
                     self.head_camera_id = i
-                    camera_info["type"] = self.head_camera_type
+                    if self.head_camera_type is not None:
+                        camera_info["type"] = self.head_camera_type
+                    camera_info.setdefault("type", "D435")
                     # camera, sensor_camera, camera_config = create_camera(camera_info)
                     camera, camera_config = create_camera(camera_info,
                                                           random_head_camera_dis=self.random_head_camera_dis)
@@ -557,20 +563,25 @@ class Camera:
         # Merge pointcloud
         if if_combine:
             # combined_pcd = np.vstack((head_pcd , left_pcd , right_pcd, front_pcd))
+            pcd_list = []
             if self.collect_wrist_camera:
                 if self.single_arm:
-                    combined_pcd = _get_camera_pcd(self.left_camera)
+                    pcd_list.append(_get_camera_pcd(self.left_camera))
                 else:
-                    combined_pcd = np.vstack((
+                    pcd_list.extend([
                         _get_camera_pcd(self.left_camera),
                         _get_camera_pcd(self.right_camera),
-                    ))
+                    ])
             for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
                 if camera_name == "head_camera":
                     if self.collect_head_camera:
-                        combined_pcd = np.vstack((combined_pcd, _get_camera_pcd(camera)))
+                        pcd_list.append(_get_camera_pcd(camera))
                 else:
-                    combined_pcd = np.vstack((combined_pcd, _get_camera_pcd(camera)))
+                    pcd_list.append(_get_camera_pcd(camera))
+            if len(pcd_list) == 0:
+                print("No camera is enabled, pointcloud save error!")
+                return None
+            combined_pcd = pcd_list[0] if len(pcd_list) == 1 else np.vstack(pcd_list)
         elif self.collect_head_camera:
             combined_pcd = _get_camera_pcd(self.static_camera_list[self.head_camera_id])
         

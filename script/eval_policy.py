@@ -20,6 +20,12 @@ import argparse
 import pdb
 
 from generate_episode_instructions import *
+from script.camera_config import (
+    get_collect_head_camera,
+    get_collect_wrist_camera,
+    get_head_camera_type,
+    get_wrist_camera_type,
+)
 from script.embodiment import resolve_embodiment_config
 
 current_file_path = os.path.abspath(__file__)
@@ -83,7 +89,7 @@ def main(usr_args):
     with open(CONFIGS_PATH + "_camera_config.yml", "r", encoding="utf-8") as f:
         _camera_config = yaml.load(f.read(), Loader=yaml.FullLoader)
 
-    head_camera_type = args["camera"]["head_camera_type"]
+    head_camera_type = get_head_camera_type(args["camera"])
     args["head_camera_h"] = _camera_config[head_camera_type]["h"]
     args["head_camera_w"] = _camera_config[head_camera_type]["w"]
 
@@ -92,7 +98,7 @@ def main(usr_args):
 
     if args["eval_video_log"]:
         video_save_dir = save_dir
-        camera_config = get_camera_config(args["camera"]["head_camera_type"])
+        camera_config = get_camera_config(head_camera_type)
         video_size = str(camera_config["w"]) + "x" + str(camera_config["h"])
         video_save_dir.mkdir(parents=True, exist_ok=True)
         args["eval_video_save_dir"] = video_save_dir
@@ -109,10 +115,10 @@ def main(usr_args):
     print("\033[95mRandom Table Height:\033[0m " + str(args["domain_randomization"]["random_table_height"]))
     print("\033[95mRandom Head Camera Distance:\033[0m " + str(args["domain_randomization"]["random_head_camera_dis"]))
 
-    print("\033[94mHead Camera Config:\033[0m " + str(args["camera"]["head_camera_type"]) + f", " +
-          str(args["camera"]["collect_head_camera"]))
-    print("\033[94mWrist Camera Config:\033[0m " + str(args["camera"]["wrist_camera_type"]) + f", " +
-          str(args["camera"]["collect_wrist_camera"]))
+    print("\033[94mHead Camera Config:\033[0m " + str(head_camera_type) + f", " +
+          str(get_collect_head_camera(args["camera"])))
+    print("\033[94mWrist Camera Config:\033[0m " + str(get_wrist_camera_type(args["camera"])) + f", " +
+          str(get_collect_wrist_camera(args["camera"])))
     print("\033[94mEmbodiment Config:\033[0m " + embodiment_name)
     print("\n==================================")
 
