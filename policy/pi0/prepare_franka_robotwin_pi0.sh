@@ -19,17 +19,19 @@ export HF_LEROBOT_HOME=${HF_LEROBOT_HOME:-"$dataset_root"}
 export PYTHONPATH="$script_dir/src:${PYTHONPATH:-}"
 export OPENPI_ROBOTWIN_FRANKA_REPO_ID="$repo_id"
 
+ffmpeg_path="$PATH"
+ffmpeg_ld_library_path="${LD_LIBRARY_PATH:-}"
 if [ -n "${FFMPEG_CONDA:-}" ]; then
-    export PATH="$FFMPEG_CONDA/bin:$PATH"
-    export LD_LIBRARY_PATH="$FFMPEG_CONDA/lib:${LD_LIBRARY_PATH:-}"
+    ffmpeg_path="$FFMPEG_CONDA/bin:$ffmpeg_path"
+    ffmpeg_ld_library_path="$FFMPEG_CONDA/lib:$ffmpeg_ld_library_path"
 elif [ -n "${CONDA_PREFIX:-}" ] && [ -d "$CONDA_PREFIX/lib" ]; then
     export FFMPEG_CONDA="$CONDA_PREFIX"
-    export PATH="$FFMPEG_CONDA/bin:$PATH"
-    export LD_LIBRARY_PATH="$FFMPEG_CONDA/lib:${LD_LIBRARY_PATH:-}"
+    ffmpeg_path="$FFMPEG_CONDA/bin:$ffmpeg_path"
+    ffmpeg_ld_library_path="$FFMPEG_CONDA/lib:$ffmpeg_ld_library_path"
 elif [ -d /mnt/public2/wph/envs/miniconda3/envs/RoboTwin ]; then
     export FFMPEG_CONDA=/mnt/public2/wph/envs/miniconda3/envs/RoboTwin
-    export PATH="$FFMPEG_CONDA/bin:$PATH"
-    export LD_LIBRARY_PATH="$FFMPEG_CONDA/lib:${LD_LIBRARY_PATH:-}"
+    ffmpeg_path="$FFMPEG_CONDA/bin:$ffmpeg_path"
+    ffmpeg_ld_library_path="$FFMPEG_CONDA/lib:$ffmpeg_ld_library_path"
 fi
 
 echo "[INFO] dataset_root: $dataset_root"
@@ -70,9 +72,9 @@ cp -r "$src_dir" "$dst_dir"
 echo "[INFO] copied processed data to: $dst_dir"
 
 echo "[INFO] generate LeRobot dataset: $repo_id"
-bash generate_franka.sh "$dst_dir" "$repo_id"
+PATH="$ffmpeg_path" LD_LIBRARY_PATH="$ffmpeg_ld_library_path" bash generate_franka.sh "$dst_dir" "$repo_id"
 
 echo "[INFO] compute norm_stats with config: $config_name"
-python scripts/compute_norm_stats.py --config-name "$config_name"
+uv run python scripts/compute_norm_stats.py --config-name "$config_name"
 
 echo "[INFO] done. repo_id=$repo_id config=$config_name"
