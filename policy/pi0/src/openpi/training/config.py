@@ -20,6 +20,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.franka_policy as franka_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -263,8 +264,8 @@ class LeRobotFrankaDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
-            inputs=[aloha_policy.FrankaInputs(action_dim=model_config.action_dim)],
-            outputs=[aloha_policy.FrankaOutputs(action_dim=8)],
+            inputs=[franka_policy.FrankaInputs(action_dim=model_config.action_dim)],
+            outputs=[franka_policy.FrankaOutputs(action_dim=8)],
         )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(7, -1)
