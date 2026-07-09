@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import dataclasses
 import difflib
 import logging
+import os
 import pathlib
 from typing import Any, Protocol, TypeAlias
 
@@ -224,6 +225,49 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
         )
         if self.use_delta_joint_actions:
             delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=False)
+class LeRobotFrankaDataConfig(DataConfigFactory):
+    # Franka vector is [7 arm joints, gripper]. Joint dimensions use delta actions,
+    # gripper remains absolute.
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = None
+
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(default=_transforms.Group(inputs=[
+        _transforms.RepackTransform({
+            "images": {
+                "cam_high": "observation.images.cam_high",
+                "cam_left_wrist": "observation.images.cam_left_wrist",
+            },
+            "state": "observation.state",
+            "actions": "action",
+        })
+    ]))
+    action_sequence_keys: Sequence[str] = ("action", )
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[aloha_policy.FrankaInputs(action_dim=model_config.action_dim)],
+            outputs=[aloha_policy.FrankaOutputs(action_dim=8)],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(7, -1)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -470,6 +514,34 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30000,
         fsdp_devices=4,  # refer line 359
+    ),
+    # pi0_base by full for single-arm Franka-Panda Robotwin data
+    TrainConfig(
+        name="pi0_base_franka_robotwin_full",
+        model=pi0.Pi0Config(),
+        data=LeRobotFrankaDataConfig(
+            repo_id=os.environ.get("OPENPI_ROBOTWIN_FRANKA_REPO_ID", "robotwin/franka_robotwin"),
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
+            base_config=DataConfig(
+                local_files_only=True,
+                prompt_from_task=True,
+            ),
+        ),
+        freeze_filter=pi0.Pi0Config().get_freeze_filter(),
+        batch_size=32,
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30000,
+        fsdp_devices=4,
     ),
     # pi0_fast_base by full
     TrainConfig(
