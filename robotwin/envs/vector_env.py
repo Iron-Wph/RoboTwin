@@ -432,8 +432,26 @@ class VectorEnv(gym.Env):
         args["save_path"] += f"/{args['task_name']}_reward"
 
         args["n_envs"] = n_envs
-        left_arm_dim = len(args["left_embodiment_config"]["arm_joints_name"][0])
-        right_arm_dim = len(args["right_embodiment_config"]["arm_joints_name"][1])
+        def get_arm_dim(embodiment_name, embodiment_config, arm_idx):
+            arm_joints_name = embodiment_config["arm_joints_name"]
+            if len(arm_joints_name) > arm_idx:
+                arm_dim = len(arm_joints_name[arm_idx])
+            else:
+                arm_dim = len(arm_joints_name[0])
+            if embodiment_name == "franka-panda":
+                # Some Franka asset configs omit the 7th arm joint name, while
+                # RoboTwin observations/actions still expose 7 joints + gripper.
+                arm_dim = max(arm_dim, 7)
+            return arm_dim
+
+        left_arm_dim = get_arm_dim(
+            str(embodiment_type[0]), args["left_embodiment_config"], 0
+        )
+        right_arm_dim = get_arm_dim(
+            str(embodiment_type[0] if len(embodiment_type) == 1 else embodiment_type[1]),
+            args["right_embodiment_config"],
+            1,
+        )
         if args.get("single_arm", False):
             active_arm = args.get("active_arm", "right")
             if active_arm not in ("left", "right"):
