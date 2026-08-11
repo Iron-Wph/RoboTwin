@@ -3,6 +3,7 @@ from .utils import *
 from .reward import *
 import sapien
 import math
+import torch
 
 
 class adjust_bottle(Base_Task):
@@ -94,3 +95,53 @@ class adjust_bottle(Base_Task):
         bottle_pose = self.bottle.get_functional_point(0)
         return ((self.qpose_tag == 0 and bottle_pose[0] < -0.15) or
                 (self.qpose_tag == 1 and bottle_pose[0] > 0.15)) and bottle_pose[2] > target_hight
+
+    def check_success_gpu(self):
+        """CUDA equivalent of ``check_success`` used only for validation.
+
+        ``Actor.get_functional_point`` is a rigid transform of a dynamic
+        actor's GPU pose.  This adapter keeps that transform and the scalar
+        threshold test on CUDA; the generic runtime still uses the CPU result
+        until full chunk-boundary semantics have been verified.
+        """
+        runtime = self._gpu_runtime
+        if runtime is None or not runtime.initialized:
+            return None
+        component = self.bottle.actor.find_component_by_type(
+            sapien.physx.PhysxRigidDynamicComponent
+        )
+        if component is None:
+            return None
+
+        pose = runtime.physx.cuda_rigid_dynamic_data.torch()[component.gpu_pose_index]
+        offset = getattr(self, "_gpu_bottle_functional_offset", None)
+        if offset is None or offset.device != pose.device:
+            local_matrix = np.asarray(self.bottle.config["functional_matrix"][0])
+            offset = torch.as_tensor(
+                local_matrix[:3, 3] * self.bottle.config["scale"],
+                device=pose.device,
+                dtype=pose.dtype,
+            )
+            self._gpu_bottle_functional_offset = offset
+
+        # SAPIEN stores quaternions as (w, x, y, z).  Rotate the functional
+        # point with q * v * q^-1 without materialising a CPU pose/matrix.
+        quat = pose[3:7]
+        q_xyz = quat[1:]
+        twice_cross = 2.0 * torch.cross(q_xyz, offset, dim=0)
+        functional_position = pose[:3] + quat[0] * twice_cross + torch.cross(
+            q_xyz, twice_cross, dim=0
+        )
+        x_ok = (
+            functional_position[0] < -0.15
+            if self.qpose_tag == 0
+            else functional_position[0] > 0.15
+        )
+        return torch.logical_and(x_ok, functional_position[2] > 0.9)
+
+    def supports_gpu_deferred_cpu_sync(self):
+        # The predicate itself is covered by ``test_gpu_success_adapter``.
+        # Runtime use is still opt-in through ``gpu_defer_cpu_sync`` and is
+        # regression-tested against the precise per-tick path before use in a
+        # training config.
+        return True

@@ -57,6 +57,12 @@ class Camera:
 
         self.collect_head_camera = kwags["camera"].get("collect_head_camera", True)
         self.collect_wrist_camera = kwags["camera"].get("collect_wrist_camera", True)
+        # SAPIEN exposes CUDA camera buffers. Legacy policies keep their
+        # original uint8 NumPy observations; compatible RLinf adapters opt in
+        # to CUDA tensors so the cross-scene batch never returns to the host.
+        self.gpu_image_readback = bool(kwags.get("_gpu_camera_readback", False))
+        self.gpu_image_tensors = bool(kwags.get("_gpu_image_tensor_obs", False))
+        self._batched_rgba = None
 
         # embodiment = kwags.get('embodiment')
         # embodiment_config_path = os.path.join(CONFIGS_PATH, '_embodiment_config.yml')
@@ -271,6 +277,8 @@ class Camera:
         self.world_camera2.entity.set_pose(sapien.Pose(world_cam_mat44))
 
     def update_picture(self):
+        if self._batched_rgba is not None:
+            return
         # camera
         if self.collect_wrist_camera:
             self.left_camera.take_picture()
@@ -327,14 +335,53 @@ class Camera:
             rgb[camera_name] = {}
             rgb[camera_name]["rgb"] = camera_data["rgba"][:, :, :3]  # Exclude alpha channel
         return rgb
+
+    @property
+    def has_batched_rgba(self):
+        return self._batched_rgba is not None
+
+    def observation_camera_entries(self):
+        """Return RGB cameras in the same order and names as ``get_rgba``."""
+        entries = []
+        if self.collect_wrist_camera:
+            entries.extend(
+                [
+                    ("left_camera", self.left_camera),
+                    ("right_camera", self.right_camera),
+                ]
+            )
+        for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_name != "head_camera" or self.collect_head_camera:
+                entries.append((camera_name, camera))
+        return entries
+
+    def set_batched_rgba(self, rgba_by_name):
+        """Install one internally batched RGB snapshot for the next get_obs."""
+        expected_names = {name for name, _ in self.observation_camera_entries()}
+        if not expected_names.issubset(rgba_by_name):
+            raise KeyError("batched RGB snapshot is missing an observation camera")
+        self._batched_rgba = {
+            name: rgba_by_name[name] for name in expected_names
+        }
     
     # Get Camera RGBA
     def get_rgba(self) -> dict:
-
-        def _get_rgba(camera):
-            camera_rgba = camera.get_picture("Color")
-            camera_rgba_img = (camera_rgba * 255).clip(0, 255).astype("uint8")
-            return camera_rgba_img
+        camera_entries = self.observation_camera_entries()
+        batched_rgba = self._batched_rgba
+        self._batched_rgba = None
+        if batched_rgba is not None:
+            rgba_by_name = batched_rgba
+        elif self.gpu_image_readback:
+            rgba_by_name = self._get_rgba_cuda_batch(
+                camera_entries, keep_cuda=self.gpu_image_tensors
+            )
+        else:
+            rgba_by_name = {
+                camera_name: (camera.get_picture("Color") * 255)
+                .clip(0, 255)
+                .astype("uint8")
+                for camera_name, camera in camera_entries
+            }
 
         # ================================= sensor camera =================================
         # def _get_sensor_rgba(sensor):
@@ -342,26 +389,31 @@ class Camera:
         #     camera_rgba_img = (camera_rgba * 255).clip(0, 255).astype("uint8")[:,:,:3]
         #     return camera_rgba_img
 
-        res = {}
-
-        if self.collect_wrist_camera:
-            res["left_camera"] = {}
-            res["right_camera"] = {}
-            res["left_camera"]["rgba"] = _get_rgba(self.left_camera)
-            res["right_camera"]["rgba"] = _get_rgba(self.right_camera)
-
-        for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
-            if camera_name == "head_camera":
-                if self.collect_head_camera:
-                    res[camera_name] = {}
-                    res[camera_name]["rgba"] = _get_rgba(camera)
-            else:
-                res[camera_name] = {}
-                res[camera_name]["rgba"] = _get_rgba(camera)
+        res = {
+            camera_name: {"rgba": rgba_by_name[camera_name]}
+            for camera_name, _ in camera_entries
+        }
         # ================================= sensor camera =================================
         # res['head_sensor']['rgb'] = _get_sensor_rgba(self.head_sensor)
 
         return res
+
+    @staticmethod
+    def _get_rgba_cuda_batch(camera_entries, *, keep_cuda=False):
+        """Read camera color buffers on CUDA and optionally retain tensors."""
+        grouped_images = {}
+        for camera_name, camera in camera_entries:
+            image = camera.get_picture_cuda("Color").torch()
+            image = image.mul(255).clamp(0, 255).to(torch.uint8)
+            grouped_images.setdefault(tuple(image.shape), []).append((camera_name, image))
+
+        rgba_by_name = {}
+        for images in grouped_images.values():
+            stacked = torch.stack([image for _, image in images], dim=0)
+            result_images = stacked if keep_cuda else stacked.cpu().numpy()
+            for (camera_name, _), image in zip(images, result_images):
+                rgba_by_name[camera_name] = image
+        return rgba_by_name
 
     def get_observer_rgb(self) -> dict:
         self.observer_camera.take_picture()

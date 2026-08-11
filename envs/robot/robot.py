@@ -14,6 +14,7 @@ import envs._GLOBAL_CONFIGS as CONFIGS
 from envs.utils import transforms
 from .planner import CuroboPlanner
 import torch.multiprocessing as mp
+import torch
 
 
 class Robot:
@@ -26,6 +27,7 @@ class Robot:
     def _init_robot_(self, scene, need_topp=False, **kwargs):
         # self.dual_arm = dual_arm_tag
         # self.plan_success = True
+        self._gpu_runtime = kwargs.get("_gpu_runtime")
 
         self.planner_backend = kwargs.get("planner_backend", "curobo")
 
@@ -231,10 +233,10 @@ class Robot:
 
     def move_to_homestate(self):
         for i, joint in enumerate(self.left_arm_joints):
-            joint.set_drive_target(self.left_homestate[i])
+            self._set_joint_target(self.left_entity, joint, self.left_homestate[i])
 
         for i, joint in enumerate(self.right_arm_joints):
-            joint.set_drive_target(self.right_homestate[i])
+            self._set_joint_target(self.right_entity, joint, self.right_homestate[i])
 
     def set_origin_endpose(self):
         self.left_original_pose = self.get_left_ee_pose()
@@ -528,14 +530,14 @@ class Robot:
     def get_left_arm_jointState(self) -> list:
         jointState_list = []
         for joint in self.left_arm_joints:
-            jointState_list.append(joint.get_drive_target()[0].astype(float))
+            jointState_list.append(float(self._get_joint_target(self.left_entity, joint)))
         jointState_list.append(self.get_left_gripper_val())
         return jointState_list
 
     def get_right_arm_jointState(self) -> list:
         jointState_list = []
         for joint in self.right_arm_joints:
-            jointState_list.append(joint.get_drive_target()[0].astype(float))
+            jointState_list.append(float(self._get_joint_target(self.right_entity, joint)))
         jointState_list.append(self.get_right_gripper_val())
         return jointState_list
 
@@ -636,24 +638,164 @@ class Robot:
         res = (endpose_arr[:3, 3].tolist() + t3d.quaternions.mat2quat(endpose_arr[:3, :3]).tolist())
         return res
 
+    def _gpu_controls_active(self):
+        return self._gpu_runtime is not None and self._gpu_runtime.initialized
+
+    def invalidate_gpu_control_cache(self):
+        """Forget CPU-side mirrors after a GPU snapshot restore."""
+        self._gpu_joint_target_cache = {}
+        self._gpu_qf_generation_by_entity = {}
+
+    def _gpu_target_cache_key(self, entity, joint):
+        return entity.gpu_index, self._joint_dof_offset(entity, joint)
+
+    def _joint_dof_offset(self, entity, joint):
+        """Return the articulation-local DOF index, caching fixed topology.
+
+        SAPIEN's active-joint list is invariant for the lifetime of one task
+        slot.  The cache removes repeated Python/SAPIEN traversal from every
+        TOPP sample, while the CPU fallback keeps the original behavior.
+        """
+        cache_key = (entity.gpu_index, id(joint))
+        if self._gpu_controls_active():
+            offsets = getattr(self, "_gpu_joint_dof_offsets", None)
+            if offsets is not None and cache_key in offsets:
+                return offsets[cache_key]
+
+        offset = 0
+        resolved_offsets = {}
+        for active_joint in entity.get_active_joints():
+            if active_joint == joint:
+                if self._gpu_controls_active():
+                    offsets = getattr(self, "_gpu_joint_dof_offsets", None)
+                    if offsets is None:
+                        offsets = {}
+                        self._gpu_joint_dof_offsets = offsets
+                    offsets.update(resolved_offsets)
+                    offsets[cache_key] = offset
+                return offset
+            resolved_offsets[(entity.gpu_index, id(active_joint))] = offset
+            offset += active_joint.dof
+        raise ValueError(f"joint {joint.get_name()} does not belong to the articulation")
+
+    def _set_joint_target(self, entity, joint, target, velocity=None):
+        if not self._gpu_controls_active():
+            joint.set_drive_target(target)
+            if velocity is not None:
+                joint.set_drive_velocity_target(velocity)
+            return
+        cache_key = self._gpu_target_cache_key(entity, joint)
+        _, dof_offset = cache_key
+        if not hasattr(self, "_gpu_joint_target_cache"):
+            self._gpu_joint_target_cache = {}
+        self._gpu_joint_target_cache[cache_key] = float(target)
+        queue_targets = getattr(self._gpu_runtime, "queue_articulation_targets", None)
+        if queue_targets is not None and queue_targets(
+            entity.gpu_index,
+            (dof_offset,),
+            (target,),
+            None if velocity is None else (velocity,),
+        ):
+            return
+
+        target_qpos = self._gpu_runtime.physx.cuda_articulation_target_qpos.torch()
+        target_qpos[entity.gpu_index, dof_offset] = target
+        if velocity is not None:
+            target_qvel = self._gpu_runtime.physx.cuda_articulation_target_qvel.torch()
+            target_qvel[entity.gpu_index, dof_offset] = velocity
+
+    def _set_joint_targets(self, entity, joints, targets, velocities=None):
+        """Write one articulation's controls with one CUDA assignment per buffer."""
+        if not self._gpu_controls_active():
+            for index, joint in enumerate(joints):
+                velocity = None if velocities is None else velocities[index]
+                self._set_joint_target(entity, joint, targets[index], velocity)
+            return
+
+        offsets = [self._joint_dof_offset(entity, joint) for joint in joints]
+        if not hasattr(self, "_gpu_joint_target_cache"):
+            self._gpu_joint_target_cache = {}
+        for joint, offset, target in zip(joints, offsets, targets):
+            self._gpu_joint_target_cache[(entity.gpu_index, offset)] = float(target)
+
+        queue_targets = getattr(self._gpu_runtime, "queue_articulation_targets", None)
+        if queue_targets is not None and queue_targets(
+            entity.gpu_index, offsets, targets, velocities
+        ):
+            return
+
+        target_qpos = self._gpu_runtime.physx.cuda_articulation_target_qpos.torch()
+        values = torch.as_tensor(targets, device=target_qpos.device, dtype=target_qpos.dtype)
+        if offsets == list(range(offsets[0], offsets[0] + len(offsets))):
+            target_qpos[entity.gpu_index, offsets[0] : offsets[0] + len(offsets)] = values
+        else:
+            indices = torch.as_tensor(offsets, device=target_qpos.device, dtype=torch.long)
+            target_qpos[entity.gpu_index, indices] = values
+
+        if velocities is not None:
+            target_qvel = self._gpu_runtime.physx.cuda_articulation_target_qvel.torch()
+            velocities = torch.as_tensor(
+                velocities, device=target_qvel.device, dtype=target_qvel.dtype
+            )
+            if offsets == list(range(offsets[0], offsets[0] + len(offsets))):
+                target_qvel[entity.gpu_index, offsets[0] : offsets[0] + len(offsets)] = velocities
+            else:
+                indices = torch.as_tensor(offsets, device=target_qvel.device, dtype=torch.long)
+                target_qvel[entity.gpu_index, indices] = velocities
+
+    def _get_joint_target(self, entity, joint):
+        if not self._gpu_controls_active():
+            return joint.get_drive_target()[0]
+        cache_key = self._gpu_target_cache_key(entity, joint)
+        if not hasattr(self, "_gpu_joint_target_cache"):
+            self._gpu_joint_target_cache = {}
+        if cache_key not in self._gpu_joint_target_cache:
+            _, dof_offset = cache_key
+            self._gpu_joint_target_cache[cache_key] = float(
+                self._gpu_runtime.physx.cuda_articulation_target_qpos.torch()[
+                    entity.gpu_index, dof_offset
+                ].item()
+            )
+        return self._gpu_joint_target_cache[cache_key]
+
     def _entity_qf(self, entity):
+        if self._gpu_controls_active():
+            generation = getattr(self._gpu_runtime, "control_generation", 0)
+            if not hasattr(self, "_gpu_qf_generation_by_entity"):
+                self._gpu_qf_generation_by_entity = {}
+            if self._gpu_qf_generation_by_entity.get(entity.gpu_index) == generation:
+                return
         qf = entity.compute_passive_force(gravity=True, coriolis_and_centrifugal=True)
-        entity.set_qf(qf)
+        if self._gpu_controls_active():
+            queue_force = getattr(self._gpu_runtime, "queue_articulation_force", None)
+            if queue_force is not None and queue_force(entity.gpu_index, qf):
+                self._gpu_qf_generation_by_entity[entity.gpu_index] = generation
+                return
+            qf_buffer = self._gpu_runtime.physx.cuda_articulation_qf.torch()
+            qf_buffer[entity.gpu_index, : entity.dof] = torch.as_tensor(
+                qf, device=qf_buffer.device, dtype=qf_buffer.dtype
+            )
+            self._gpu_qf_generation_by_entity[entity.gpu_index] = generation
+        else:
+            entity.set_qf(qf)
 
     def set_arm_joints(self, target_position, target_velocity, arm_tag):
         self._entity_qf(self.left_entity)
         self._entity_qf(self.right_entity)
 
         joint_lst = self.left_arm_joints if arm_tag == "left" else self.right_arm_joints
+        entity = self.left_entity if arm_tag == "left" else self.right_entity
+        if self._gpu_controls_active():
+            self._set_joint_targets(entity, joint_lst, target_position, target_velocity)
+            return
         for j in range(len(joint_lst)):
             joint = joint_lst[j]
-            joint.set_drive_target(target_position[j])
-            joint.set_drive_velocity_target(target_velocity[j])
+            self._set_joint_target(entity, joint, target_position[j], target_velocity[j])
 
     def get_normal_real_gripper_val(self):
-        normal_left_gripper_val = (self.left_gripper[0][0].get_drive_target()[0] - self.left_gripper_scale[0]) / (
+        normal_left_gripper_val = (self._get_joint_target(self.left_entity, self.left_gripper[0][0]) - self.left_gripper_scale[0]) / (
             self.left_gripper_scale[1] - self.left_gripper_scale[0])
-        normal_right_gripper_val = (self.right_gripper[0][0].get_drive_target()[0] - self.right_gripper_scale[0]) / (
+        normal_right_gripper_val = (self._get_joint_target(self.right_entity, self.right_gripper[0][0]) - self.right_gripper_scale[0]) / (
             self.right_gripper_scale[1] - self.right_gripper_scale[0])
         normal_left_gripper_val = np.clip(normal_left_gripper_val, 0, 1)
         normal_right_gripper_val = np.clip(normal_right_gripper_val, 0, 1)
@@ -666,11 +808,13 @@ class Robot:
 
         if arm_tag == "left":
             joints = self.left_gripper
+            entity = self.left_entity
             self.left_gripper_val = gripper_val
             gripper_scale = self.left_gripper_scale
             real_gripper_val = self.get_normal_real_gripper_val()[0]
         else:
             joints = self.right_gripper
+            entity = self.right_entity
             self.right_gripper_val = gripper_val
             gripper_scale = self.right_gripper_scale
             real_gripper_val = self.get_normal_real_gripper_val()[1]
@@ -685,12 +829,16 @@ class Robot:
 
         real_gripper_val = gripper_scale[0] + gripper_val * (gripper_scale[1] - gripper_scale[0])
 
-        for joint in joints:
-            real_joint: sapien.physx.PhysxArticulationJoint = joint[0]
-            drive_target = real_gripper_val * joint[1] + joint[2]
-            drive_velocity_target = (np.clip(drive_target - real_joint.drive_target, -1.0, 1.0) * 0.05)
-            real_joint.set_drive_target(drive_target)
-            real_joint.set_drive_velocity_target(drive_velocity_target)
+        real_joints = [joint[0] for joint in joints]
+        drive_targets = [real_gripper_val * joint[1] + joint[2] for joint in joints]
+        drive_velocity_targets = [
+            np.clip(drive_target - self._get_joint_target(entity, joint), -1.0, 1.0)
+            * 0.05
+            for drive_target, joint in zip(drive_targets, real_joints)
+        ]
+        self._set_joint_targets(
+            entity, real_joints, drive_targets, drive_velocity_targets
+        )
 
 
 def planner_process_worker(conn, args):

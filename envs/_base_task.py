@@ -1,6 +1,7 @@
 import os
 import re
 import gc
+import time
 import sapien.core as sapien
 from sapien.render import clear_cache as sapien_clear_cache
 from sapien.utils.viewer import Viewer
@@ -89,6 +90,17 @@ class Base_Task(gym.Env):
         self.file_path = []
         self.plan_success = True
         self.fix_gripper = False
+        self._shared_scene = kwags.get("_shared_scene")
+        self._gpu_runtime = kwags.get("_gpu_runtime")
+        self._gpu_env_id = kwags.get("_gpu_env_id")
+        # Validation is deliberately opt-in: it compares a task-provided GPU
+        # success predicate with the existing CPU predicate at every tick.
+        # It is a test instrument, never the default rollout behavior.
+        self._gpu_validate_success_adapter = bool(
+            kwags.get("gpu_validate_success_adapter", False)
+        )
+        self._gpu_success_validation_ticks = 0
+        self._gpu_planner_pending = self._gpu_runtime is not None
         self.setup_scene()
 
         self.left_js = None
@@ -126,7 +138,8 @@ class Base_Task(gym.Env):
 
         render_freq = self.render_freq
         self.render_freq = 0
-        self.together_open_gripper(save_freq=None)
+        if self._gpu_runtime is None:
+            self.together_open_gripper(save_freq=None)
         self.render_freq = render_freq
 
         self.robot.set_origin_endpose()
@@ -173,7 +186,7 @@ class Base_Task(gym.Env):
         def check(times):
             nonlocal self, is_stable, actors_list, actors_pose_list
             for _ in range(times):
-                self.scene.step()
+                self._physics_step()
                 for idx, actor in enumerate(actors_list):
                     actors_pose_list[idx].append(actor.get_pose())
 
@@ -187,7 +200,7 @@ class Base_Task(gym.Env):
 
         is_stable = True
         for _ in range(2000):
-            self.scene.step()
+            self._physics_step()
         for idx, actor in enumerate(actors_list):
             actors_pose_list.append([actor.get_pose()])
         check(500)
@@ -199,28 +212,67 @@ class Base_Task(gym.Env):
     def check_success(self):
         pass
 
+    def check_success_gpu(self):
+        """Return a CUDA bool for a task-specific success predicate, or ``None``.
+
+        A generic task cannot infer arbitrary Python/SAPIEN success logic.  A
+        task may implement this private hook after proving it agrees with
+        :meth:`check_success`; the normal CPU predicate remains authoritative
+        until the task is explicitly approved for deferred synchronization.
+        """
+        return None
+
+    def _validate_gpu_success_adapter(self, cpu_success: bool) -> None:
+        """Fail fast if an opt-in GPU predicate diverges from CPU semantics."""
+        if not self._gpu_validate_success_adapter:
+            return
+        gpu_success = self.check_success_gpu()
+        if not isinstance(gpu_success, torch.Tensor) or gpu_success.numel() != 1:
+            raise RuntimeError(
+                f"{self.task_name} must return one CUDA bool from check_success_gpu() "
+                "when gpu_validate_success_adapter is enabled"
+            )
+        if not gpu_success.is_cuda:
+            raise RuntimeError("check_success_gpu() must keep its result on CUDA")
+        if bool(gpu_success.item()) != bool(cpu_success):
+            raise AssertionError(
+                f"GPU success adapter diverged from CPU check_success in {self.task_name}"
+            )
+        self._gpu_success_validation_ticks += 1
+
+    def supports_gpu_deferred_cpu_sync(self):
+        """Whether this task was verified with chunk-boundary success checks.
+
+        The generic GPU runtime must not assume that a task's CPU success
+        predicate is stable for a full action chunk.  Tasks retain the exact
+        per-tick CPU fallback unless they opt in here after a task-level
+        trajectory and success-rate regression.
+        """
+        return False
+
     def setup_scene(self, **kwargs):
         """
         Set the scene
             - Set up the basic scene: light source, viewer.
         """
-        self.engine = sapien.Engine()
         # declare sapien renderer
         from sapien.render import set_global_config
 
         set_global_config(max_num_materials=50000, max_num_textures=50000)
-        self.renderer = sapien.SapienRenderer()
-        # give renderer to sapien sim
-        self.engine.set_renderer(self.renderer)
-
-        sapien.render.set_camera_shader_dir("rt")
-        sapien.render.set_ray_tracing_samples_per_pixel(32)
-        sapien.render.set_ray_tracing_path_depth(8)
-        sapien.render.set_ray_tracing_denoiser("oidn")
-
-        # declare sapien scene
-        scene_config = sapien.SceneConfig()
-        self.scene = self.engine.create_scene(scene_config)
+        if self._shared_scene is None:
+            self.engine = sapien.Engine()
+            self.renderer = sapien.SapienRenderer()
+            self.engine.set_renderer(self.renderer)
+            sapien.render.set_camera_shader_dir("rt")
+            sapien.render.set_ray_tracing_samples_per_pixel(32)
+            sapien.render.set_ray_tracing_path_depth(8)
+            sapien.render.set_ray_tracing_denoiser("oidn")
+            scene_config = sapien.SceneConfig()
+            self.scene = self.engine.create_scene(scene_config)
+        else:
+            self.engine = None
+            self.renderer = None
+            self.scene = self._shared_scene
         # set simulation timestep
         self.scene.set_timestep(kwargs.get("timestep", 1 / 250))
         # add ground to scene
@@ -394,7 +446,8 @@ class Base_Task(gym.Env):
         """
         if not hasattr(self, "robot") or self.robot is None:
             self.robot = Robot(self.scene, self.need_topp, **kwags)
-            self.robot.set_planner(self.scene)
+            if not self._gpu_planner_pending:
+                self.robot.set_planner(self.scene)
             self.robot.init_joints()
         else:
             self.robot.reset(self.scene, self.need_topp, **kwags)
@@ -418,16 +471,53 @@ class Base_Task(gym.Env):
             **kwags,
         )
         self.cameras.load_camera(self.scene)
-        self.scene.step()  # run a physical step
+        self._physics_step()  # run a physical step
         self.scene.update_render()  # sync pose from SAPIEN to renderer
 
     # =========================================================== Sapien ===========================================================
 
-    def _update_render(self):
+    def finalize_gpu_construction(self):
+        """Create planners after GPU buffers are valid for the fixed topology."""
+        if self._gpu_planner_pending:
+            # A shared GPU PhysX system exposes all slot components to mplib's
+            # SAPIEN converter.  Use its URDF-only planner here; task collision
+            # resolution remains in PhysX and batched scene collision support is
+            # added by the vector scheduler rather than a per-slot CPU world.
+            self.robot.set_planner(None)
+            self._gpu_planner_pending = False
+            self.robot.set_gripper(1, "left", gripper_eps=0)
+            self.robot.set_gripper(1, "right", gripper_eps=0)
+
+    def _physics_step(self):
+        """Use CPU stepping normally; defer physical settling during GPU construction."""
+        if self._gpu_runtime is None:
+            self.scene.step()
+        elif not self._gpu_runtime.initialized:
+            return
+        else:
+            self._gpu_runtime.step_slot(self._gpu_env_id)
+
+    def _record_gpu_profile_timing(self, name, started_at):
+        """Record internal timing only when this task belongs to a GPU runtime."""
+        if self._gpu_runtime is not None:
+            self._gpu_runtime.record_profile_timing(name, time.perf_counter() - started_at)
+
+    def _update_render(self, force=False):
         """
         Update rendering to refresh the camera's RGBD information
         (rendering must be updated even when disabled, otherwise data cannot be collected).
         """
+        if (
+            not force
+            and self._gpu_runtime is not None
+            and self._gpu_runtime.initialized
+            and self._gpu_runtime.batched_step_active
+        ):
+            # A task can execute many control ticks before producing one
+            # observation.  GPU physics has already synchronized poses; defer
+            # render-system work until get_obs() needs the final camera frame.
+            return
+        started_at = time.perf_counter()
         if self.crazy_random_light:
             for renderColor in self.point_light_lst:
                 renderColor.set_color([np.random.rand(), np.random.rand(), np.random.rand()])
@@ -438,6 +528,7 @@ class Base_Task(gym.Env):
             self.scene.set_ambient_light(now_ambient_light)
         self.cameras.update_wrist_camera(self.robot.left_camera.get_pose(), self.robot.right_camera.get_pose())
         self.scene.update_render()
+        self._record_gpu_profile_timing("render_update_s", started_at)
 
     # =========================================================== Basic APIs ===========================================================
 
@@ -460,8 +551,13 @@ class Base_Task(gym.Env):
         return positions[indices], velocities[indices]
 
     def get_obs(self):
-        self._update_render()
-        self.cameras.update_picture()
+        if not self.cameras.has_batched_rgba:
+            self._update_render(force=True)
+            camera_capture_started_at = time.perf_counter()
+            self.cameras.update_picture()
+            self._record_gpu_profile_timing(
+                "camera_capture_s", camera_capture_started_at
+            )
         pkl_dic = {
             "observation": {},
             "pointcloud": [],
@@ -472,7 +568,11 @@ class Base_Task(gym.Env):
         pkl_dic["observation"] = self.cameras.get_config()
         # rgb
         if self.data_type.get("rgb", True):
+            camera_readback_started_at = time.perf_counter()
             rgb = self.cameras.get_rgb()
+            self._record_gpu_profile_timing(
+                "camera_readback_s", camera_readback_started_at
+            )
             for camera_name in rgb.keys():
                 pkl_dic["observation"][camera_name].update(rgb[camera_name])
 
@@ -669,6 +769,11 @@ class Base_Task(gym.Env):
             del self.eval_video_ffmpeg
 
     def delay(self, delay_time, save_freq=None):
+        if self._gpu_runtime is not None and not self._gpu_runtime.initialized:
+            # Settling is performed once for the whole batch after all scenes are
+            # built; task-local delay would otherwise require an unavailable
+            # planner before the GPU buffers exist.
+            return
         render_freq = self.render_freq
         self.render_freq = 0
 
@@ -948,7 +1053,7 @@ class Base_Task(gym.Env):
                 )
                 now_right_id += 1
 
-            self.scene.step()
+            self._physics_step()
             if self.render_freq and i % self.render_freq == 0:
                 self._update_render()
                 self.viewer.render()
@@ -1520,7 +1625,7 @@ class Base_Task(gym.Env):
                     right_gripper["per_step"],
                 )  # TODO
 
-            self.scene.step()
+            self._physics_step()
 
             if self.render_freq and control_idx % self.render_freq == 0:
                 self._update_render()
@@ -1730,7 +1835,7 @@ class Base_Task(gym.Env):
 
                 now_right_id += 1
 
-            self.scene.step()
+            self._physics_step()
             self._update_render()
                 
             if self.check_success():
@@ -1759,7 +1864,7 @@ class Base_Task(gym.Env):
             termination = np.array([1], dtype=np.int32)
             return reward, termination, truncation, infos
 
-        if self.take_action_cnt == self.step_lim:
+        if self.take_action_cnt >= self.step_lim:
             truncation = np.array([1], dtype=np.int32)
             return reward, termination, truncation, infos
 
@@ -1769,6 +1874,7 @@ class Base_Task(gym.Env):
         if self.render_freq:
             self.viewer.render()
 
+        trajectory_prepare_started_at = time.perf_counter()
         actions = chunk_actions
         left_jointstate = self.robot.get_left_arm_jointState()
         right_jointstate = self.robot.get_right_arm_jointState()
@@ -1816,13 +1922,42 @@ class Base_Task(gym.Env):
         left_path = self.compress_path(left_path)
         right_path = self.compress_path(right_path)
 
+        self._record_gpu_profile_timing(
+            "trajectory_prepare_s", trajectory_prepare_started_at
+        )
+
         # ========== TOPP ==========
         topp_left_flag, topp_right_flag = True, True
+        topp_started_at = time.perf_counter()
+
+        def run_left_topp():
+            return self.robot.left_mplib_planner.TOPP(
+                left_path, 1 / 250, verbose=True
+            )
+
+        def run_right_topp():
+            return self.robot.right_mplib_planner.TOPP(
+                right_path, 1 / 250, verbose=True
+            )
+
+        if self._gpu_runtime is not None:
+            (left_topp, left_topp_error), (right_topp, right_topp_error) = (
+                self._gpu_runtime.run_topp_pair(run_left_topp, run_right_topp)
+            )
+        else:
+            try:
+                left_topp, left_topp_error = run_left_topp(), None
+            except Exception as error:
+                left_topp, left_topp_error = None, error
+            try:
+                right_topp, right_topp_error = run_right_topp(), None
+            except Exception as error:
+                right_topp, right_topp_error = None, error
 
         try:
-            times, left_pos, left_vel, acc, duration = (
-                self.robot.left_mplib_planner.TOPP(left_path, 1 / 250, verbose=True)
-            )
+            if left_topp_error is not None:
+                raise left_topp_error
+            times, left_pos, left_vel, acc, duration = left_topp
 
             left_pos, left_vel = self.downsample_trajectory(left_pos, left_vel)
 
@@ -1839,9 +1974,9 @@ class Base_Task(gym.Env):
             left_n_step = 50  # fixed
 
         try:
-            times, right_pos, right_vel, acc, duration = (
-                self.robot.right_mplib_planner.TOPP(right_path, 1 / 250, verbose=True)
-            )
+            if right_topp_error is not None:
+                raise right_topp_error
+            times, right_pos, right_vel, acc, duration = right_topp
 
             right_pos, right_vel = self.downsample_trajectory(right_pos, right_vel)
 
@@ -1857,7 +1992,12 @@ class Base_Task(gym.Env):
             topp_right_flag = False
             right_n_step = 50  # fixed
 
+        if self._gpu_runtime is not None:
+            self._gpu_runtime.record_topp_timing(time.perf_counter() - topp_started_at)
+
         # ========== Gripper ==========
+
+        trajectory_prepare_started_at = time.perf_counter()
 
         left_mod_num = left_n_step % len(left_gripper_actions)
         right_mod_num = right_n_step % len(right_gripper_actions)
@@ -1890,12 +2030,17 @@ class Base_Task(gym.Env):
             right_gripper = right_gripper + region_right_gripper.tolist()
         right_gripper = np.array(right_gripper)
 
+        self._record_gpu_profile_timing(
+            "trajectory_prepare_s", trajectory_prepare_started_at
+        )
+
         now_left_id, now_right_id = 0, 0
 
         # ========== Control Loop ==========
         steps_executed = 0
 
         while now_left_id < left_n_step or now_right_id < right_n_step:
+            control_dispatch_started_at = time.perf_counter()
             if (
                 now_left_id < left_n_step
                 and now_left_id / left_n_step <= now_right_id / right_n_step
@@ -1924,17 +2069,35 @@ class Base_Task(gym.Env):
 
                 now_right_id += 1
 
-            self.scene.step()
+            self._record_gpu_profile_timing(
+                "control_dispatch_s", control_dispatch_started_at
+            )
+
+            self._physics_step()
             self._update_render()
             steps_executed += 1
 
-            if self.check_success():
-                self.eval_success = True
+            # CPU predicates normally need the pose copied from GPU each tick.
+            # The deferred path is gated by the task capability above; its
+            # single CPU fallback runs in ``GpuTaskSlot.step`` after every
+            # local scene has completed the action chunk.
+            if not (
+                self._gpu_runtime is not None
+                and self._gpu_runtime.defer_cpu_sync
+            ):
+                success_check_started_at = time.perf_counter()
+                is_success = self.check_success()
+                self._validate_gpu_success_adapter(is_success)
+                self._record_gpu_profile_timing(
+                    "success_check_s", success_check_started_at
+                )
+                if is_success:
+                    self.eval_success = True
 
-                infos["success"] = True
-                reward = np.array([1], dtype=np.float32)
-                termination = np.array([1], dtype=np.int32)
-                return reward, termination, truncation, infos
+                    infos["success"] = True
+                    reward = np.array([1], dtype=np.float32)
+                    termination = np.array([1], dtype=np.int32)
+                    return reward, termination, truncation, infos
 
         if getattr(self, "eval_success", False):
             infos["success"] = True
@@ -2176,7 +2339,7 @@ class Base_Task(gym.Env):
 
                         now_right_id +=1
                     
-                    self.scene.step()
+                    self._physics_step()
                     # self._update_render()
                     i+=1
                     
@@ -2404,7 +2567,7 @@ class Base_Task(gym.Env):
 
                     now_right_id +=1
                 
-                self.scene.step()
+                self._physics_step()
                 self._update_render()
 
                 if self.check_success():
