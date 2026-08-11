@@ -72,8 +72,13 @@ class place_empty_cup(Base_Task):
     def play_once(self):
         # Get the current pose of the cup
         cup_pose = self.cup.get_pose().p
-        # Determine which arm to use based on cup's x position (right if positive, left if negative)
-        arm_tag = ArmTag("right" if cup_pose[0] > 0 else "left")
+        # Single-arm tasks select their configured physical arm; dual-arm
+        # tasks retain RoboTwin's original side-based choice.
+        arm_tag = ArmTag(
+            self.active_arm
+            if getattr(self, "single_arm", False)
+            else ("right" if cup_pose[0] > 0 else "left")
+        )
 
         # Close the gripper to prepare for grasping
         self.move(self.close_gripper(arm_tag, pos=0.6))

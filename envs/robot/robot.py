@@ -30,6 +30,12 @@ class Robot:
         self._gpu_runtime = kwargs.get("_gpu_runtime")
 
         self.planner_backend = kwargs.get("planner_backend", "curobo")
+        self.single_arm = bool(kwargs.get("single_arm", False))
+        self.active_arm = kwargs.get("active_arm", "right")
+        if self.active_arm not in ("left", "right"):
+            raise ValueError(
+                f"active_arm must be 'left' or 'right', not {self.active_arm}"
+            )
 
         self.left_js = None
         self.right_js = None
@@ -95,7 +101,7 @@ class Robot:
         _entity_origion_pose = _entity_origion_pose[0 if len(_entity_origion_pose) == 1 else 1]
         _entity_origion_pose = sapien.Pose(_entity_origion_pose[:3], _entity_origion_pose[-4:])
         self.right_entity_origion_pose = deepcopy(_entity_origion_pose)
-        self.is_dual_arm = kwargs["dual_arm_embodied"]
+        self.is_dual_arm = kwargs["dual_arm_embodied"] and not self.single_arm
 
         self.left_rotate_lim = left_embodiment_args.get("rotate_lim", [0, 0])
         self.right_rotate_lim = right_embodiment_args.get("rotate_lim", [0, 0])
@@ -105,7 +111,7 @@ class Robot:
         self.right_perfect_direction = right_embodiment_args.get("grasp_perfect_direction",
                                                                  ["front_right", "front_left"])[1]
 
-        if self.is_dual_arm:
+        if kwargs["dual_arm_embodied"]:
             loader: sapien.URDFLoader = scene.create_urdf_loader()
             loader.fix_root_link = True
             self._entity = loader.load(self.left_urdf_path)
@@ -146,6 +152,12 @@ class Robot:
             return self.left_perfect_direction
         elif arm_tag == "right":
             return self.right_perfect_direction
+
+    def _single_arm_enabled(self):
+        return getattr(self, "single_arm", False)
+
+    def _active_arm(self):
+        return getattr(self, "active_arm", "right")
 
     def create_target_pose_list(self, origin_pose, center_pose, arm_tag=None):
         res_lst = []
@@ -232,6 +244,19 @@ class Robot:
             )
 
     def move_to_homestate(self):
+        if self._single_arm_enabled():
+            if self._active_arm() == "left":
+                joint_list = self.left_arm_joints
+                homestate = self.left_homestate
+                entity = self.left_entity
+            else:
+                joint_list = self.right_arm_joints
+                homestate = self.right_homestate
+                entity = self.right_entity
+            for joint, target in zip(joint_list, homestate):
+                self._set_joint_target(entity, joint, target)
+            return
+
         for i, joint in enumerate(self.left_arm_joints):
             self._set_joint_target(self.left_entity, joint, self.left_homestate[i])
 
@@ -571,23 +596,28 @@ class Robot:
             return 0
         return self.right_gripper_val
 
+    def _status_gripper_val(self, arm_tag):
+        if self._single_arm_enabled():
+            arm_tag = self._active_arm()
+        return self.left_gripper_val if arm_tag == "left" else self.right_gripper_val
+
     def is_left_gripper_open(self):
-        return self.left_gripper_val > 0.8
+        return self._status_gripper_val("left") > 0.8
 
     def is_right_gripper_open(self):
-        return self.right_gripper_val > 0.8
+        return self._status_gripper_val("right") > 0.8
 
     def is_left_gripper_open_half(self):
-        return self.left_gripper_val > 0.45
+        return self._status_gripper_val("left") > 0.45
 
     def is_right_gripper_open_half(self):
-        return self.right_gripper_val > 0.45
+        return self._status_gripper_val("right") > 0.45
 
     def is_left_gripper_close(self):
-        return self.left_gripper_val < 0.2
+        return self._status_gripper_val("left") < 0.2
 
     def is_right_gripper_close(self):
-        return self.right_gripper_val < 0.2
+        return self._status_gripper_val("right") < 0.2
 
     # get move group joint pose
     def get_left_ee_pose(self):

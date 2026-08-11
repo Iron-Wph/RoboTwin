@@ -69,7 +69,13 @@ class Base_Task(gym.Env):
         self.render_freq = kwags.get("render_freq", 10)
         self.data_type = kwags.get("data_type", None)
         self.save_data = kwags.get("save_data", False)
-        self.dual_arm = kwags.get("dual_arm", True)
+        self.single_arm = bool(kwags.get("single_arm", False))
+        self.active_arm = kwags.get("active_arm", "right")
+        if self.active_arm not in ("left", "right"):
+            raise ValueError(
+                f"active_arm must be 'left' or 'right', not {self.active_arm}"
+            )
+        self.dual_arm = False if self.single_arm else kwags.get("dual_arm", True)
         self.eval_mode = kwags.get("eval_mode", False)
         self.step_lim = kwags.get("step_lim", None)
 
@@ -538,7 +544,10 @@ class Base_Task(gym.Env):
             if not np.allclose(path[i], compressed[-1], atol=tolerance, rtol=0):
                 compressed.append(path[i])
         if len(compressed) == 1:
-            compressed.append(compressed[0].copy() + np.random.normal(0, 2e-4, 6))
+            compressed.append(
+                compressed[0].copy()
+                + np.random.normal(0, 2e-4, path.shape[-1])
+            )
         return np.array(compressed)
 
     def downsample_trajectory(self, positions, velocities, max_points=500):
@@ -549,6 +558,181 @@ class Base_Task(gym.Env):
         indices = np.linspace(0, n_points - 1, max_points).astype(int)
         indices = np.unique(indices)
         return positions[indices], velocities[indices]
+
+    # ========================================================= Single-arm RL =========================================================
+    def _single_arm_enabled(self):
+        return self.single_arm
+
+    def _active_arm(self):
+        return self.active_arm
+
+    def _arm_joint_state(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.get_left_arm_jointState()
+        if arm_tag == "right":
+            return self.robot.get_right_arm_jointState()
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _arm_ee_pose(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.get_left_ee_pose()
+        if arm_tag == "right":
+            return self.robot.get_right_ee_pose()
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _arm_mplib_planner(self, arm_tag):
+        if arm_tag == "left":
+            return self.robot.left_mplib_planner
+        if arm_tag == "right":
+            return self.robot.right_mplib_planner
+        raise ValueError(f"arm_tag must be 'left' or 'right', not {arm_tag}")
+
+    def _single_arm_action_dim(self):
+        return len(self._arm_joint_state(self._active_arm()))
+
+    def _prepare_single_arm_actions(self, chunk_actions):
+        actions = np.asarray(chunk_actions)
+        if actions.ndim == 1:
+            actions = actions[None, :]
+        if actions.ndim != 2:
+            raise ValueError(
+                "single-arm actions must have shape [chunk, action_dim], "
+                f"got {actions.shape}"
+            )
+        expected_dim = self._single_arm_action_dim()
+        if actions.shape[-1] != expected_dim:
+            raise ValueError(
+                f"single-arm action dimension mismatch for {self._active_arm()} arm: "
+                f"expected {expected_dim}, got {actions.shape[-1]}"
+            )
+        return actions
+
+    def _plan_single_arm_qpos_path(self, arm_tag, arm_path, downsample=True):
+        started_at = time.perf_counter()
+        try:
+            _, positions, velocities, _, _ = self._arm_mplib_planner(arm_tag).TOPP(
+                arm_path, 1 / 250, verbose=True
+            )
+            if downsample:
+                positions, velocities = self.downsample_trajectory(positions, velocities)
+            result = {"position": positions, "velocity": velocities}
+            n_step = positions.shape[0]
+            valid = n_step > 0
+        except Exception:
+            valid = False
+            result = None
+            n_step = 50
+        if self._gpu_runtime is not None:
+            self._gpu_runtime.record_topp_timing(time.perf_counter() - started_at)
+        return valid, result, n_step
+
+    @staticmethod
+    def _interpolate_gripper_path(gripper_path, n_step, action_count):
+        step_sizes = [0] + [
+            n_step // action_count + (1 if index < n_step % action_count else 0)
+            for index in range(action_count)
+        ]
+        values = []
+        for index in range(1, gripper_path.shape[0]):
+            values.extend(
+                np.linspace(
+                    gripper_path[index - 1],
+                    gripper_path[index],
+                    step_sizes[index] + 1,
+                )[1:].tolist()
+            )
+        return np.asarray(values)
+
+    def _execute_single_arm_qpos_actions(self, chunk_actions, downsample=True):
+        actions = self._prepare_single_arm_actions(chunk_actions)
+        arm_tag = self._active_arm()
+        joint_state = self._arm_joint_state(arm_tag)
+        arm_dim = len(joint_state) - 1
+        arm_path = np.vstack((joint_state[:arm_dim], actions[:, :arm_dim]))
+        gripper_path = np.hstack((joint_state[arm_dim], actions[:, arm_dim]))
+        arm_path = self.compress_path(arm_path)
+
+        topp_valid, trajectory, n_step = self._plan_single_arm_qpos_path(
+            arm_tag, arm_path, downsample=downsample
+        )
+        gripper_values = self._interpolate_gripper_path(
+            gripper_path, n_step, actions.shape[0]
+        )
+
+        for step_index in range(n_step):
+            control_started_at = time.perf_counter()
+            if topp_valid:
+                self.robot.set_arm_joints(
+                    trajectory["position"][step_index],
+                    trajectory["velocity"][step_index],
+                    arm_tag,
+                )
+            if not self.fix_gripper:
+                self.robot.set_gripper(gripper_values[step_index], arm_tag)
+            self._record_gpu_profile_timing("control_dispatch_s", control_started_at)
+
+            self._physics_step()
+            self._update_render()
+
+            if not (
+                self._gpu_runtime is not None
+                and self._gpu_runtime.defer_cpu_sync
+            ):
+                success_started_at = time.perf_counter()
+                is_success = self.check_success()
+                self._validate_gpu_success_adapter(is_success)
+                self._record_gpu_profile_timing("success_check_s", success_started_at)
+                if is_success:
+                    self.eval_success = True
+                    return True
+        return False
+
+    def _gen_sparse_reward_data_single_arm(self, chunk_actions, action_type="qpos"):
+        if action_type != "qpos":
+            raise NotImplementedError("single-arm RoboTwin RL supports qpos actions only")
+
+        infos = {"success": False}
+        reward = np.array([0], dtype=np.float32)
+        termination = np.array([0], dtype=np.int32)
+        truncation = np.array([0], dtype=np.int32)
+        if self.eval_success:
+            infos["success"] = True
+            return np.array([1], dtype=np.float32), np.array([1], dtype=np.int32), truncation, infos
+        if self.take_action_cnt >= self.step_lim:
+            return reward, termination, np.array([1], dtype=np.int32), infos
+
+        actions = self._prepare_single_arm_actions(chunk_actions)
+        self.take_action_cnt += actions.shape[0]
+        self._update_render()
+        if self.render_freq:
+            self.viewer.render()
+
+        if self._execute_single_arm_qpos_actions(actions, downsample=True):
+            infos["success"] = True
+            return np.array([1], dtype=np.float32), np.array([1], dtype=np.int32), truncation, infos
+
+        if self.eval_success:
+            infos["success"] = True
+            reward = np.array([1], dtype=np.float32)
+            termination = np.array([1], dtype=np.int32)
+        if self.take_action_cnt >= self.step_lim:
+            truncation = np.array([1], dtype=np.int32)
+        self._update_render()
+        if self.render_freq:
+            self.viewer.render()
+        return reward, termination, truncation, infos
+
+    def _take_action_single_arm(self, action, action_type="qpos"):
+        if action_type != "qpos":
+            raise NotImplementedError("single-arm RoboTwin RL supports qpos actions only")
+        if self.take_action_cnt >= self.step_lim or self.eval_success:
+            return
+        actions = self._prepare_single_arm_actions(action)
+        self.take_action_cnt += actions.shape[0]
+        self._update_render()
+        if self.render_freq:
+            self.viewer.render()
+        self._execute_single_arm_qpos_actions(actions, downsample=False)
 
     def get_obs(self):
         if not self.cameras.has_batched_rgba:
@@ -1641,6 +1825,9 @@ class Base_Task(gym.Env):
         return True  # TODO: maybe need try error
 
     def take_action(self, action, action_type:Literal['qpos', 'ee']='qpos'):  # action_type: qpos or ee
+        if self._single_arm_enabled():
+            return self._take_action_single_arm(action, action_type)
+
         if self.take_action_cnt == self.step_lim or self.eval_success:
             return
 
@@ -1850,6 +2037,9 @@ class Base_Task(gym.Env):
             self.viewer.render()
 
     def gen_sparse_reward_data(self, chunk_actions, action_type="qpos"):  # action_type: qpos or ee
+
+        if self._single_arm_enabled():
+            return self._gen_sparse_reward_data_single_arm(chunk_actions, action_type)
 
         infos = {
             "success": False,
@@ -2609,6 +2799,14 @@ class Base_Task(gym.Env):
     
     def is_in_hand(self, actor):
         # 判断夹爪中心位置与物体中心位置的距离, 夹爪是否关闭
+        if self._single_arm_enabled():
+            arm_tag = self._active_arm()
+            actor_pose = actor.pose() if hasattr(actor, "pose") else actor.get_pose().p
+            in_hand = np.linalg.norm(
+                np.asarray(self._arm_ee_pose(arm_tag))[:3] - actor_pose
+            ) < 0.05
+            return (in_hand, False) if arm_tag == "left" else (False, in_hand)
+
         if self.dual_arm:
             contacts = self.scene.get_contacts()
             left_gripper_contact_count = 0

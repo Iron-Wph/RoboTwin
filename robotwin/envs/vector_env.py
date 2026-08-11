@@ -47,7 +47,7 @@ def class_decorator(task_name):
     return env_instance
 
 
-def update_obs(observation):
+def update_obs(observation, args=None):
     full_image = observation["observation"]["head_camera"]["rgb"]
     left_wrist_image = (
         observation["observation"].get("left_camera", {}).get("rgb", None)
@@ -55,7 +55,25 @@ def update_obs(observation):
     right_wrist_image = (
         observation["observation"].get("right_camera", {}).get("rgb", None)
     )
-    state = observation["joint_action"]["vector"]
+    if args is not None and args.get("single_arm", False):
+        active_arm = args.get("active_arm", "right")
+        if active_arm not in ("left", "right"):
+            raise ValueError(
+                f"active_arm must be 'left' or 'right', got {active_arm}"
+            )
+        arm_key = f"{active_arm}_arm"
+        gripper_key = f"{active_arm}_gripper"
+        joint_action = observation["joint_action"]
+        state = np.asarray(
+            list(joint_action[arm_key]) + [joint_action[gripper_key]],
+            dtype=np.float32,
+        )
+        if active_arm == "left":
+            right_wrist_image = None
+        else:
+            left_wrist_image = None
+    else:
+        state = observation["joint_action"]["vector"]
 
     return {
         "full_image": full_image,
@@ -129,7 +147,7 @@ class SubEnv:
 
         with self.lock:
             reward, termination, truncation, info = self.task.gen_sparse_reward_data(actions)
-            obs = update_obs(self.task.get_obs())
+            obs = update_obs(self.task.get_obs(), self.args)
             obs["instruction"] = self.task.get_instruction()
 
         return {
@@ -183,7 +201,7 @@ class SubEnv:
     def get_obs(self):
         with self.lock:
             obs = self.task.get_obs()
-            obs = update_obs(obs)
+            obs = update_obs(obs, self.args)
             obs["instruction"] = self.task.get_instruction()
 
         return obs
@@ -304,7 +322,7 @@ class GpuTaskSlot:
                 reward = np.array([1], dtype=np.float32)
                 termination = np.array([1], dtype=np.int32)
         after_control = time.perf_counter()
-        obs = update_obs(self.task.get_obs())
+        obs = update_obs(self.task.get_obs(), self.args)
         self.runtime.record_slot_timing(
             after_control - started_at,
             time.perf_counter() - after_control,
@@ -339,7 +357,7 @@ class GpuTaskSlot:
 
     def get_obs(self):
         with self.lock:
-            obs = update_obs(self.task.get_obs())
+            obs = update_obs(self.task.get_obs(), self.args)
             obs["instruction"] = self.instruction
             return obs
 
@@ -479,6 +497,11 @@ class VectorEnv(gym.Env):
                 assets_path, get_embodiment_file(embodiment_type[0])
             )
             args["dual_arm_embodied"] = True
+            embodiment_config = get_embodiment_config(args["left_robot_file"])
+            args["single_arm"] = bool(
+                args.get("single_arm", embodiment_config.get("dual_arm") is False)
+            )
+            args["active_arm"] = args.get("active_arm", "right")
         elif len(embodiment_type) == 3:
             args["left_robot_file"] = os.path.join(
                 assets_path, get_embodiment_file(embodiment_type[0])
@@ -488,6 +511,8 @@ class VectorEnv(gym.Env):
             )
             args["embodiment_dis"] = embodiment_type[2]
             args["dual_arm_embodied"] = False
+            args["single_arm"] = bool(args.get("single_arm", False))
+            args["active_arm"] = args.get("active_arm", "right")
         else:
             raise "embodiment items should be 1 or 3"
 
@@ -495,6 +520,13 @@ class VectorEnv(gym.Env):
         args["right_embodiment_config"] = get_embodiment_config(
             args["right_robot_file"]
         )
+
+        if args["active_arm"] not in ("left", "right"):
+            raise ValueError(
+                f"active_arm must be 'left' or 'right', got {args['active_arm']}"
+            )
+        if args["single_arm"]:
+            args["dual_arm"] = False
 
         if len(embodiment_type) == 1:
             embodiment_name = str(embodiment_type[0])
@@ -507,7 +539,19 @@ class VectorEnv(gym.Env):
         args["save_path"] += f"/{args['task_name']}_reward"
 
         args["n_envs"] = n_envs
-        args["action_dim"] = 14
+
+        def get_arm_dim(embodiment_config, arm_index):
+            arm_joint_names = embodiment_config["arm_joints_name"]
+            return len(arm_joint_names[min(arm_index, len(arm_joint_names) - 1)])
+
+        left_arm_dim = get_arm_dim(args["left_embodiment_config"], 0)
+        right_arm_dim = get_arm_dim(args["right_embodiment_config"], 1)
+        if args["single_arm"]:
+            args["action_dim"] = (
+                left_arm_dim if args["active_arm"] == "left" else right_arm_dim
+            ) + 1
+        else:
+            args["action_dim"] = left_arm_dim + 1 + right_arm_dim + 1
 
         args["eval_mode"] = True
         args["eval_video_log"] = False

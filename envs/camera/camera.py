@@ -10,6 +10,7 @@ import torch
 import yaml
 import trimesh
 import math
+from copy import deepcopy
 from .._GLOBAL_CONFIGS import CONFIGS_PATH
 import os
 from sapien.sensor import StereoDepthSensor, StereoDepthSensorConfig
@@ -76,7 +77,15 @@ class Camera:
         # with open(robot_config_file, 'r', encoding='utf-8') as f:
         #     embodiment_args = yaml.load(f.read(), Loader=yaml.FullLoader)
         # TODO
-        self.static_camera_info_list = kwags["left_embodiment_config"]["static_camera_list"]
+        self.static_camera_info_list = deepcopy(
+            kwags["left_embodiment_config"]["static_camera_list"]
+        )
+        static_camera_override = kwags["camera"].get("static_camera_list")
+        if static_camera_override is not None:
+            self.static_camera_info_list = deepcopy(static_camera_override)
+        self.static_camera_info_list.extend(
+            deepcopy(kwags["camera"].get("extra_static_camera_list", []))
+        )
         self.static_camera_num = len(self.static_camera_info_list)
 
     def load_camera(self, scene):
